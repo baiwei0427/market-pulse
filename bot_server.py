@@ -48,7 +48,7 @@ _running = True
 # Shared lock so the background analysis and /report never run concurrently.
 _analysis_lock = threading.Lock()
 
-BACKGROUND_INTERVAL = 300  # seconds between automatic analysis runs
+BACKGROUND_INTERVAL = 600  # seconds between automatic analysis runs
 
 
 def _uptime() -> str:
