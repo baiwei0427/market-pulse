@@ -152,11 +152,14 @@ def _article_id(link: str, title: str) -> str:
 def fetch_feed(url: str) -> list[Article]:
     try:
         status, body = http_request(url)
+        if status == 429:
+            logger.warning("Feed %s returned HTTP 429 (rate limited); skipping", url)
+            return []
         if status != 200:
-            logger.warning("Feed %s returned HTTP %s", url, status)
+            logger.warning("Feed %s returned HTTP %s; skipping", url, status)
             return []
     except Exception as e:
-        logger.warning("Failed to fetch %s: %s", url, e)
+        logger.warning("Failed to fetch %s: %s; skipping", url, e)
         return []
     try:
         root = ET.fromstring(body)

@@ -1,167 +1,156 @@
-# Trump Market-Impact News Agent
+# Market Pulse
 
-A small Python agent that pulls recent Trump-related news from public RSS
-feeds, asks the GitHub Copilot chat API (model `claude-opus-4.6 + gpt-5.4 (dual model)`) whether each
-item is market-moving, and pushes a Telegram alert when impact is significant.
+A Python agent that monitors Trump and Federal Reserve news via public RSS
+feeds, uses dual AI models (`claude-opus-4.6` + `gpt-5.4`) through the GitHub
+Copilot API to assess market impact, and sends Telegram alerts when both models
+agree on high-impact events. Includes an interactive Telegram bot for on-demand
+reports.
 
 > ⚠️ For informational/educational use only. Nothing this agent outputs is
 > financial advice.
 
+## How It Works
+
+1. **RSS fetching** — pulls headlines from Nitter (X/Twitter) and Google News RSS feeds.
+2. **Dual-model analysis** — each article is analyzed by both `claude-opus-4.6` and `gpt-5.4`; only articles where both models score impact ≥ 6 trigger alerts.
+3. **Telegram notifications** — high-impact verdicts are sent as bilingual (EN/ZH) alerts with affected sectors, tickers, direction, and action.
+4. **Paper trading** — optionally executes simulated trades based on AI recommendations using live Yahoo Finance prices.
+
 ## Files
 
-- `market_pulse.py` — main script (run this).
-- `paper_trader.py` — paper trading simulator (auto-invoked by `market_pulse.py`).
-- `portfolio_report.py` — daily portfolio summary sent to Telegram.
-- `config.py` — configuration (Telegram credentials, model, thresholds, feeds,
-  paper-trading parameters).
-- `seen_articles.json` — auto-created store of already-processed article IDs.
-- `portfolio.json` — auto-created paper-trading portfolio state.
-- `market_pulse.log` — rotating log file (also mirrors to stdout).
+| File | Description |
+|---|---|
+| `market_pulse.py` | Cron-driven news pipeline (fetch → analyze → alert) |
+| `bot_server.py` | Long-running Telegram bot server (`/report`, `/status` commands) |
+| `config.py` | Your local configuration (git-ignored) |
+| `config.example.py` | Template config with placeholder values |
+| `seen_articles.json` | Auto-created de-duplication store |
+| `market_pulse.log` | Rotating log file |
 
 ## Requirements
 
-- Python 3.10+.
-- `pip install yfinance` (only dependency outside the standard library; used
-  by the paper trader for real-time prices).
-- `gh` CLI installed and authenticated (`gh auth login`) so the agent can
-  fetch a token with `gh auth token`. Alternatively set `COPILOT_TOKEN`
-  directly.
-- A GitHub Copilot subscription on the authenticated account.
-- A Telegram bot and the chat ID you want to notify.
+- Python 3.10+
+- `pip install yfinance` (only non-stdlib dependency; used by the paper trader)
+- `gh` CLI installed and authenticated (`gh auth login`), or set `COPILOT_TOKEN` directly
+- A GitHub Copilot subscription on the authenticated account
+- A Telegram bot token and chat ID
 
 ## Setup
 
-1. **Clone / copy** the three files into a directory, e.g. `~/trump-agent/`.
+1. **Clone the repo:**
+   ```bash
+   git clone https://github.com/baiwei0427/market-pulse.git
+   cd market-pulse
+   ```
 
-2. **Authenticate `gh`** (one-time):
+2. **Create your config:**
+   ```bash
+   cp config.example.py config.py
+   ```
+   Edit `config.py` and fill in your real `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+
+3. **Create a Telegram bot** (if you don't have one):
+   - Talk to [@BotFather](https://t.me/BotFather), run `/newbot`, copy the token.
+   - Send your bot any message, then visit
+     `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your `chat.id`.
+
+4. **Authenticate `gh`:**
    ```bash
    gh auth login
    gh auth token   # confirm a token prints
    ```
 
-3. **Create a Telegram bot:**
-   - Talk to [@BotFather](https://t.me/BotFather), `/newbot`, copy the token.
-   - Send your bot any message from your account, then visit
-     `https://api.telegram.org/bot<TOKEN>/getUpdates` and grab the
-     `chat.id` value (or use a group/channel ID).
-
-4. **Configure** — edit `config.py` *or* export env vars:
+5. **Install dependencies:**
    ```bash
-   export TELEGRAM_BOT_TOKEN="123456:ABC..."
-   export TELEGRAM_CHAT_ID="123456789"
-   # Optional overrides:
-   export COPILOT_MODEL="claude-opus-4.6 + gpt-5.4 (dual model)"
-   export COPILOT_TOKEN=""   # leave empty to use `gh auth token`
+   pip install yfinance
    ```
 
-5. **Dry run:**
+6. **Test run:**
    ```bash
-   python3 trump_agent.py
-   tail -f trump_agent.log
+   python3 market_pulse.py
+   tail -f market_pulse.log
    ```
 
-## Cron (every 5 minutes)
+## Running
+
+### Cron — automated news monitoring (`market_pulse.py`)
+
+Run every 5 minutes to continuously monitor news:
 
 ```cron
-*/5 * * * * cd /home/youruser/trump-agent && /usr/bin/python3 trump_agent.py >> /dev/null 2>&1
+*/5 * * * * cd /home/youruser/market-pulse && /usr/bin/python3 market_pulse.py >> /dev/null 2>&1
 ```
 
-The script takes an exclusive file lock (`.trump_agent.lock`), so overlapping
-runs are safe — a second invocation simply exits.
+The script uses an exclusive file lock (`.market_pulse.lock`) so overlapping runs are safe.
 
-If your cron environment lacks your shell PATH, export the Telegram vars in a
-wrapper script or put them in the crontab itself:
+### Telegram bot — interactive commands (`bot_server.py`)
 
-```cron
-TELEGRAM_BOT_TOKEN=123456:ABC...
-TELEGRAM_CHAT_ID=123456789
-*/5 * * * * cd /home/youruser/trump-agent && /usr/bin/python3 trump_agent.py
+The bot server provides on-demand commands:
+
+| Command | Description |
+|---|---|
+| `/report` | Fetch latest RSS articles, analyze with dual models, send ranked report |
+| `/status` | Show bot uptime, last report stats, and active model configuration |
+
+#### Run with systemd (recommended)
+
+Create `/etc/systemd/system/market-pulse-bot.service`:
+
+```ini
+[Unit]
+Description=Market Pulse Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/home/youruser/market-pulse
+ExecStart=/usr/bin/python3 /home/youruser/market-pulse/bot_server.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then enable and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable market-pulse-bot
+sudo systemctl start market-pulse-bot
+sudo systemctl status market-pulse-bot
 ```
 
 ## Tuning
 
 `config.py` exposes:
 
-- `RSS_FEEDS` — add/remove sources. Defaults to Google News searches.
-- `IMPACT_THRESHOLD` — 0-10; only verdicts at or above this trigger a
-  Telegram message. Default `6`.
-- `MAX_ARTICLES_PER_RUN` — caps Copilot calls per cron tick. Default `20`.
+- `RSS_FEEDS` — add/remove sources. Nitter feeds may return 429; alternative X/Twitter RSS sources are listed as comments.
+- `IMPACT_THRESHOLD` — 0–10; only verdicts at or above this trigger alerts. Default `6`.
+- `MAX_ARTICLES_PER_RUN` — caps Copilot API calls per run. Default `20`.
 - `SEEN_RETENTION_DAYS` — how long to remember article IDs. Default `14`.
+- `COPILOT_MODEL` / `COPILOT_MODEL_2` — the two models used for dual analysis.
 
-## How analysis works
+## Paper Trading
 
-For each new article the agent sends headline + summary to the Copilot
-endpoint with `response_format=json_object` and this schema:
+When `PAPER_TRADING_ENABLED` is true (default), the agent runs a simulated
+portfolio alongside the news pipeline, persisted to `portfolio.json`.
 
-```json
-{
-  "impact_score": 0,
-  "summary": "...",
-  "sectors": ["..."],
-  "tickers": ["..."],
-  "direction": "bullish|bearish|mixed|neutral",
-  "action": "buy|sell|hold",
-  "rationale": "..."
-}
-```
+- Initial capital: `$10,000`
+- Allocation per signal: `10%` of cash, split across recommended tickers
+- Stop-loss: `-5%`, take-profit: `+10%`, max hold: `48h`
+- Prices from Yahoo Finance (`yfinance`)
 
-Verdicts at or above `IMPACT_THRESHOLD` are formatted as a MarkdownV2
-Telegram message containing what Trump said, affected sectors/tickers,
-direction, suggested action, and a link back to the source.
-
-## Paper trading
-
-When `PAPER_TRADING_ENABLED` is true (the default) the agent runs a fully
-simulated portfolio alongside the news pipeline. State is persisted to
-`portfolio.json`.
-
-Rules (all configurable in `config.py`):
-
-- Initial capital `$10,000` (`PAPER_INITIAL_CAPITAL`).
-- On every high-impact `buy` verdict, allocate `10%` of current cash
-  (`PAPER_ALLOCATION_PCT`) split equally across the recommended tickers.
-- On every high-impact `sell` verdict, liquidate any held positions in
-  those tickers.
-- Stop-loss at `-5%`, take-profit at `+10%`, max hold time `48h`
-  (`PAPER_STOP_LOSS_PCT`, `PAPER_TAKE_PROFIT_PCT`, `PAPER_MAX_HOLD_HOURS`).
-- Prices come from Yahoo Finance (`yfinance`).
-- Tickers are normalised and filtered against an index/junk blocklist;
-  unknown symbols are skipped (logged) rather than executed.
-
-Every cron tick, before processing new articles, the agent sweeps open
-positions and closes any that hit the thresholds above. Trade executions
-and position closes are pushed to Telegram as plain-text messages so the
-MarkdownV2 escape rules don't matter.
-
-### Daily report
-
-`portfolio_report.py` produces a human-readable summary (cash, market value,
-unrealized & realized P&L, total return, per-position table) and sends it to
-Telegram. Schedule it once per day, e.g. 21:00 UTC (after the US close):
-
-```cron
-0 21 * * 1-5 cd /home/youruser/market-pulse && /usr/bin/python3 portfolio_report.py
-```
-
-Inspect the current portfolio at any time without sending Telegram:
-
-```bash
-python3 paper_trader.py    # prints JSON snapshot
-```
+All parameters are configurable in `config.py`.
 
 ## Troubleshooting
 
-- **`gh auth token` returns empty** — run `gh auth login` and ensure the
-  account has Copilot access.
-- **Copilot HTTP 401/403** — the token has expired or the account lacks
-  Copilot; re-auth `gh`.
-- **No Telegram messages** — confirm `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
-  are set (the log will warn `Telegram not configured`) and check that the
-  bot has been started by the target chat.
-- **Empty feed results** — Google News occasionally rate-limits; the agent
-  logs a warning and continues with whatever feeds did respond.
-- **Paper trader skips a ticker** — the log will show either
-  `BUY <SYM> skipped: no price` (yfinance had no quote, often for
-  non-US-listed or invalid symbols) or `BUY skipped: per-ticker allocation
-  $X < minimum $Y` (cash too low to deploy meaningfully). Adjust
-  `PAPER_MIN_ALLOC_PER_TICKER` if needed.
+- **`gh auth token` returns empty** — run `gh auth login`; ensure the account has Copilot.
+- **Copilot HTTP 401/403** — token expired or no Copilot subscription; re-auth `gh`.
+- **No Telegram messages** — check `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in `config.py`.
+- **RSS feed 429 errors** — Nitter rate-limits; the agent logs a warning and continues. Try alternative RSS sources in `config.py`.
+
+## License
+
+[MIT](LICENSE)
