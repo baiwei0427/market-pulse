@@ -1,0 +1,7 @@
+__pycache__/
+*.lock
+*.log
+seen_articles.json
+portfolio.json
+config.py
+config.py.local
