@@ -199,7 +199,7 @@ def handle_report(chat_id: int | str) -> None:
     # Build report
     lines = [
         "📊 MARKET PULSE REPORT / 市场脉搏报告",
-        f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"🕐 {datetime.now(timezone(timedelta(hours=-7))).strftime('%Y-%m-%d %H:%M PST')}",
         f"📰 {len(articles)} articles scanned, {analyzed} analyzed",
         "",
         f"🎯 Overall Sentiment / 总体情绪: {dominant.upper()} / {dominant_zh.get(dominant, dominant)}",
