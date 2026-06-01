@@ -14,7 +14,6 @@ reports.
 1. **RSS fetching** — pulls headlines from Nitter (X/Twitter) and Google News RSS feeds.
 2. **Dual-model analysis** — each article is analyzed by both `claude-opus-4.6` and `gpt-5.4`; only articles where both models score impact ≥ 6 trigger alerts.
 3. **Telegram notifications** — high-impact verdicts are sent as bilingual (EN/ZH) alerts with affected sectors, tickers, direction, and action.
-4. **Paper trading** — optionally executes simulated trades based on AI recommendations using live Yahoo Finance prices.
 
 ## Files
 
@@ -30,7 +29,6 @@ reports.
 ## Requirements
 
 - Python 3.10+
-- `pip install yfinance` (only non-stdlib dependency; used by the paper trader)
 - `gh` CLI installed and authenticated (`gh auth login`), or set `COPILOT_TOKEN` directly
 - A GitHub Copilot subscription on the authenticated account
 - A Telegram bot token and chat ID
@@ -62,8 +60,9 @@ reports.
 
 5. **Install dependencies:**
    ```bash
-   pip install yfinance
+   pip install -r requirements.txt
    ```
+   (Optional: if no requirements.txt, no extra packages needed beyond Python's stdlib)
 
 6. **Test run:**
    ```bash
@@ -131,18 +130,6 @@ sudo systemctl status market-pulse-bot
 - `MAX_ARTICLES_PER_RUN` — caps Copilot API calls per run. Default `20`.
 - `SEEN_RETENTION_DAYS` — how long to remember article IDs. Default `14`.
 - `COPILOT_MODEL` / `COPILOT_MODEL_2` — the two models used for dual analysis.
-
-## Paper Trading
-
-When `PAPER_TRADING_ENABLED` is true (default), the agent runs a simulated
-portfolio alongside the news pipeline, persisted to `portfolio.json`.
-
-- Initial capital: `$10,000`
-- Allocation per signal: `10%` of cash, split across recommended tickers
-- Stop-loss: `-5%`, take-profit: `+10%`, max hold: `48h`
-- Prices from Yahoo Finance (`yfinance`)
-
-All parameters are configurable in `config.py`.
 
 ## Troubleshooting
 

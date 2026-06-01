@@ -395,35 +395,6 @@ def handle_update(update: dict) -> None:
                 "/status — Show bot status and uptime")
 
 
-
-_analysis_lock = threading.Lock()
-_last_analysis = 0.0
-_ANALYSIS_INTERVAL = 300  # 5 minutes
-
-
-def _background_analysis():
-    """Run news analysis every 5 minutes in background."""
-    global _last_analysis
-    while _running:
-        now = time.time()
-        if now - _last_analysis >= _ANALYSIS_INTERVAL:
-            if _analysis_lock.acquire(blocking=False):
-                try:
-                    logger.info("Background analysis starting...")
-                    token = get_copilot_token()
-                    articles = gather_articles()
-                    seen = load_seen()
-                    mp_process(articles, seen, token)
-                    save_seen(seen)
-                    _last_analysis = time.time()
-                    logger.info("Background analysis done")
-                except Exception as e:
-                    logger.error("Background analysis failed: %s", e)
-                finally:
-                    _analysis_lock.release()
-        time.sleep(10)
-
-
 def main() -> None:
     global _running
     setup_logging()
@@ -436,11 +407,6 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
-
-    # Start background analysis thread
-    bg_thread = threading.Thread(target=_background_analysis, daemon=True)
-    bg_thread.start()
-    logger.info("Background analysis thread started (every %ds)", _ANALYSIS_INTERVAL)
 
     offset: int | None = None
     poll_timeout = 30
