@@ -1,7 +1,7 @@
 # Trump Market-Impact News Agent
 
 A small Python agent that pulls recent Trump-related news from public RSS
-feeds, asks the GitHub Copilot chat API (model `gpt-5.4-mini`) whether each
+feeds, asks the GitHub Copilot chat API (model `claude-opus-4.6 + gpt-5.4 (dual model)`) whether each
 item is market-moving, and pushes a Telegram alert when impact is significant.
 
 > ⚠️ For informational/educational use only. Nothing this agent outputs is
@@ -50,7 +50,7 @@ item is market-moving, and pushes a Telegram alert when impact is significant.
    export TELEGRAM_BOT_TOKEN="123456:ABC..."
    export TELEGRAM_CHAT_ID="123456789"
    # Optional overrides:
-   export COPILOT_MODEL="gpt-5.4-mini"
+   export COPILOT_MODEL="claude-opus-4.6 + gpt-5.4 (dual model)"
    export COPILOT_TOKEN=""   # leave empty to use `gh auth token`
    ```
 

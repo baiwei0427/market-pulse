@@ -4,7 +4,7 @@
 Pipeline:
   1. Pull recent Trump-related items from RSS feeds.
   2. De-dupe against a local JSON store of previously processed IDs.
-  3. For each new item, ask the GitHub Copilot chat API (gpt-5.4-mini) to
+  3. For each new item, ask the GitHub Copilot chat API (claude-opus-4.6 + gpt-5.4 (dual model)) to
      classify expected stock-market impact and recommend an action.
   4. If the AI returns a high-impact verdict, push a Telegram notification.
 
