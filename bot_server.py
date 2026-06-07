@@ -472,7 +472,11 @@ def _send_daily_summary() -> None:
 
 
 def _send_premarket_alert() -> None:
-    """Generate and send the 9:00 AM ET pre-market alert."""
+    """Generate and send the 9:00 AM ET pre-market alert.
+
+    Does a fresh RSS fetch followed by per-article AI analysis so the alert
+    reflects the latest overnight/pre-market news rather than cached data.
+    """
     logger.info("Generating pre-market alert…")
     chat_id = config.TELEGRAM_CHAT_ID
     try:
@@ -481,24 +485,48 @@ def _send_premarket_alert() -> None:
         logger.error("Pre-market alert: failed to get token: %s", e)
         return
 
+    # Fresh fetch — deliberately bypasses the seen-articles store so we always
+    # analyse the most recent overnight headlines regardless of prior runs.
     articles = gather_articles()
     if not articles:
         tg_send_long(chat_id, "🌅 Pre-Market: No significant news to report.")
         return
 
-    # Get recent articles (last 16 hours covers overnight news)
-    news_text = "\n".join(
-        f"- {a.title} (Source: {a.source})"
-        for a in articles[:15]
-    )
+    # AI-analyse the top articles to surface genuine market-movers.
+    results: list[tuple[Article, dict]] = []
+    cap = min(len(articles), 12)
+    for article in articles[:cap]:
+        try:
+            verdict = analyze_article_dual(article, token)
+        except Exception as e:
+            logger.error("Pre-market analysis error: %s", e)
+            continue
+        if verdict:
+            results.append((article, verdict))
+
+    results.sort(key=lambda x: float(x[1].get("impact_score", 0)), reverse=True)
+    top = results[:6]
+
+    # Build an AI-synthesised outlook from the scored articles.
+    if top:
+        news_text = "\n".join(
+            f"- {a.title} (Impact: {v.get('impact_score', 0)}/10, "
+            f"Direction: {v.get('direction', 'neutral')}, "
+            f"Sectors: {', '.join(v.get('sectors') or [])}, "
+            f"Tickers: {', '.join(v.get('tickers') or [])})"
+            for a, v in top
+        )
+    else:
+        news_text = "\n".join(f"- {a.title}" for a in articles[:10])
 
     prompt = (
-        f"It's 30 minutes before US market open. Based on overnight/pre-market news, provide:\n"
-        f"1. Key events that could move markets today (earnings, Fed speeches, geopolitical)\n"
-        f"2. Sectors to watch\n"
-        f"3. Key levels or risks\n"
-        f"Be concise and actionable.\n\n"
-        f"Recent headlines:\n{news_text}"
+        "It's 30 minutes before US market open. Based on these pre-scored overnight "
+        "headlines, provide:\n"
+        "1. Key events that could move markets today\n"
+        "2. Sectors and tickers to watch\n"
+        "3. Key risks or catalysts\n"
+        "Be concise and actionable.\n\n"
+        f"Scored headlines:\n{news_text}"
     )
 
     analysis = _copilot_chat(prompt, token)
@@ -514,7 +542,14 @@ def _send_premarket_alert() -> None:
     if analysis:
         lines.append(analysis)
     else:
-        lines.append("Unable to generate analysis. Check recent news manually.")
+        # Fallback: list top movers directly
+        lines.append("TOP PRE-MARKET MOVERS:")
+        for i, (a, v) in enumerate(top[:5], 1):
+            tickers = ", ".join(v.get("tickers") or []) or "—"
+            lines.append(
+                f"{i}. [{v.get('direction', '?').upper()}] {a.title[:80]}"
+                f"\n   Tickers: {tickers} | Impact: {v.get('impact_score', 0)}/10"
+            )
 
     lines.append("\n⚠️ AI analysis, not financial advice.")
     tg_send_long(chat_id, "\n".join(lines))
@@ -534,25 +569,29 @@ def _scheduler_loop() -> None:
             today_str = now_et.strftime("%Y-%m-%d")
             hour, minute = now_et.hour, now_et.minute
 
-            # Daily market summary at 4:30 PM ET (16:30)
-            if hour == 16 and 30 <= minute < 35 and last_summary_date != today_str:
+            # Daily market summary at 4:30 PM ET (16:30) — weekdays only
+            if (hour == 16 and 30 <= minute < 35
+                    and now_et.weekday() < 5  # Mon=0 … Fri=4
+                    and last_summary_date != today_str):
                 last_summary_date = today_str
                 try:
                     _send_daily_summary()
                 except Exception:
                     logger.exception("Daily summary failed")
 
-            # Pre-market alert at 9:00 AM ET
-            if hour == 9 and 0 <= minute < 5 and last_premarket_date != today_str:
+            # Pre-market alert at 9:00 AM ET — weekdays only
+            if (hour == 9 and 0 <= minute < 5
+                    and now_et.weekday() < 5
+                    and last_premarket_date != today_str):
                 last_premarket_date = today_str
                 try:
                     _send_premarket_alert()
                 except Exception:
                     logger.exception("Pre-market alert failed")
 
-            # Check prediction accuracy every 6 hours
+            # Check prediction accuracy every 24 hours
             if last_accuracy_check is None or \
-               (datetime.now(timezone.utc) - last_accuracy_check).total_seconds() > 21600:
+               (datetime.now(timezone.utc) - last_accuracy_check).total_seconds() > 86400:
                 last_accuracy_check = datetime.now(timezone.utc)
                 try:
                     _check_predictions()
@@ -790,7 +829,7 @@ def handle_ask(chat_id: int | str, question: str) -> None:
         f"mention relevant recent news. If speculative, note uncertainty."
     )
 
-    answer = _copilot_chat(prompt, token)
+    answer = _copilot_chat(prompt, token, model="claude-opus-4.6")
     if answer:
         tg_send_long(chat_id, f"💬 {answer}\n\n⚠️ AI analysis, not financial advice.")
     else:
@@ -833,19 +872,22 @@ def handle_ticker(chat_id: int | str, symbol: str) -> None:
     except Exception as e:
         price_info = f"⚠️ Price fetch failed: {e}\n"
 
-    # Search for news about this ticker
+    # Search Google News RSS specifically for this ticker
     try:
         token = get_copilot_token()
     except Exception as e:
         tg_send(chat_id, f"{price_info}\n❌ Failed to get API token for analysis: {e}")
         return
 
-    articles = gather_articles()
-    # Filter articles mentioning this ticker
-    relevant = [a for a in articles if symbol in a.title.upper() or symbol in a.summary.upper()]
+    gnews_url = (
+        f"https://news.google.com/rss/search?q={symbol}+stock+when:3d"
+        f"&hl=en-US&gl=US&ceid=US:en"
+    )
+    relevant = fetch_feed(gnews_url)
+    # Fall back to general feeds filtered by symbol if Google News yields nothing
     if not relevant:
-        # Broaden: use first few articles as general context
-        relevant = articles[:5]
+        all_articles = gather_articles()
+        relevant = [a for a in all_articles if symbol in a.title.upper() or symbol in a.summary.upper()]
 
     news_context = "\n".join(f"- {a.title}" for a in relevant[:8])
 
@@ -865,11 +907,10 @@ def handle_ticker(chat_id: int | str, symbol: str) -> None:
         price_info,
     ]
 
-    if relevant and any(symbol in a.title.upper() for a in relevant):
+    if relevant:
         lines.append("📰 RECENT NEWS:")
-        for a in relevant[:3]:
-            if symbol in a.title.upper():
-                lines.append(f"  • {a.title[:80]}")
+        for a in relevant[:5]:
+            lines.append(f"  • {a.title[:80]}")
         lines.append("")
 
     if analysis:
