@@ -3,8 +3,11 @@
 
 Long-running service that listens for commands via Telegram Bot API
 long polling (getUpdates). Supports:
-  /report  — fetch RSS, analyze top 10 articles, send bilingual summary
-  /status  — show bot uptime and last run stats
+  /report   — fetch RSS, analyze top 10 articles, send bilingual summary
+  /status   — show bot uptime and last run stats
+  /ask      — ask AI about current market conditions
+  /ticker   — get AI analysis for a specific stock symbol
+  /accuracy — show prediction accuracy stats
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config
 from market_pulse import (
@@ -30,7 +33,7 @@ from market_pulse import (
     http_request,
     load_seen,
     save_seen,
-    process as mp_process,
+    send_telegram as mp_send_telegram,
     setup_logging,
     logger,
     send_telegram_text,
@@ -50,6 +53,11 @@ _analysis_lock = threading.Lock()
 
 BACKGROUND_INTERVAL = 600  # seconds between automatic analysis runs
 
+# Eastern Time offset helpers
+ET_OFFSET = timezone(timedelta(hours=-5))  # EST (EDT is -4)
+
+ACCURACY_FILE = os.path.join(config.BASE_DIR, "accuracy.json")
+
 
 def _uptime() -> str:
     delta = datetime.now(timezone.utc) - _start_time
@@ -63,6 +71,212 @@ def _uptime() -> str:
         parts.append(f"{hours}h")
     parts.append(f"{minutes}m {seconds}s")
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Accuracy tracking
+# ---------------------------------------------------------------------------
+
+
+def _load_accuracy() -> list[dict]:
+    """Load accuracy records from accuracy.json."""
+    if not os.path.exists(ACCURACY_FILE):
+        return []
+    try:
+        with open(ACCURACY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Failed to read accuracy file: %s", e)
+    return []
+
+
+def _save_accuracy(records: list[dict]) -> None:
+    """Save accuracy records to accuracy.json."""
+    tmp = ACCURACY_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2)
+    os.replace(tmp, ACCURACY_FILE)
+
+
+def _record_prediction(verdict: dict, article_title: str) -> None:
+    """Record a high-impact prediction for later accuracy checking."""
+    records = _load_accuracy()
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "article_title": article_title[:200],
+        "direction": (verdict.get("direction") or "neutral").lower(),
+        "action": (verdict.get("action") or "hold").lower(),
+        "tickers": verdict.get("tickers") or [],
+        "impact_score": verdict.get("impact_score", 0),
+        "models": [
+            {"model": m.get("model", "?"), "score": m.get("score", 0),
+             "direction": (m.get("verdict", {}).get("direction") or "neutral").lower()}
+            for m in (verdict.get("models") or [])
+        ],
+        "checked": False,
+        "correct": None,
+        "actual_moves": None,
+    }
+    records.append(record)
+    _save_accuracy(records)
+    logger.info("Recorded prediction for accuracy tracking: %s", article_title[:80])
+
+
+def _check_predictions() -> None:
+    """Check predictions that are 24+ hours old against actual price moves."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.error("yfinance not installed; cannot check predictions")
+        return
+
+    records = _load_accuracy()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    changed = False
+
+    for record in records:
+        if record.get("checked"):
+            continue
+        try:
+            ts = datetime.fromisoformat(record["timestamp"])
+        except (ValueError, KeyError):
+            continue
+        if ts > cutoff:
+            continue  # Not yet 24 hours old
+
+        tickers = record.get("tickers") or []
+        if not tickers:
+            record["checked"] = True
+            record["correct"] = None
+            record["actual_moves"] = {}
+            changed = True
+            continue
+
+        predicted_direction = record.get("direction", "neutral")
+        actual_moves = {}
+        correct_count = 0
+        total_checked = 0
+
+        for ticker in tickers[:5]:
+            try:
+                stock = yf.Ticker(ticker)
+                hist = stock.history(period="5d")
+                if len(hist) < 2:
+                    continue
+                # Compare close prices: day of prediction vs next day
+                price_before = hist["Close"].iloc[-2]
+                price_after = hist["Close"].iloc[-1]
+                pct_change = ((price_after - price_before) / price_before) * 100
+                actual_moves[ticker] = round(pct_change, 2)
+
+                total_checked += 1
+                if predicted_direction == "bullish" and pct_change > 0:
+                    correct_count += 1
+                elif predicted_direction == "bearish" and pct_change < 0:
+                    correct_count += 1
+                elif predicted_direction in ("neutral", "mixed"):
+                    if abs(pct_change) < 1.0:
+                        correct_count += 1
+            except Exception as e:
+                logger.warning("Failed to check ticker %s: %s", ticker, e)
+
+        record["checked"] = True
+        record["actual_moves"] = actual_moves
+        if total_checked > 0:
+            record["correct"] = correct_count >= (total_checked / 2)
+        else:
+            record["correct"] = None
+        changed = True
+
+    if changed:
+        _save_accuracy(records)
+        logger.info("Accuracy check completed; updated %d records",
+                    sum(1 for r in records if r.get("checked")))
+
+
+def _get_accuracy_stats() -> str:
+    """Generate accuracy statistics report."""
+    records = _load_accuracy()
+    checked = [r for r in records if r.get("checked") and r.get("correct") is not None]
+
+    if not checked:
+        return "📊 No accuracy data yet. Predictions need 24+ hours to be verified."
+
+    total = len(checked)
+    correct = sum(1 for r in checked if r["correct"])
+    accuracy = (correct / total * 100) if total > 0 else 0
+
+    lines = [
+        "📊 PREDICTION ACCURACY STATS",
+        f"═══════════════════════════════",
+        f"Overall: {correct}/{total} correct ({accuracy:.1f}%)",
+        "",
+    ]
+
+    # Breakdown by model
+    model_stats: dict[str, dict[str, int]] = {}
+    for record in checked:
+        for m in record.get("models") or []:
+            model_name = m.get("model", "unknown")
+            if model_name not in model_stats:
+                model_stats[model_name] = {"total": 0, "correct": 0}
+            model_stats[model_name]["total"] += 1
+            # Check if model's individual direction prediction was correct
+            model_dir = m.get("direction", "neutral")
+            actual_moves = record.get("actual_moves") or {}
+            if actual_moves:
+                avg_move = sum(actual_moves.values()) / len(actual_moves)
+                if model_dir == "bullish" and avg_move > 0:
+                    model_stats[model_name]["correct"] += 1
+                elif model_dir == "bearish" and avg_move < 0:
+                    model_stats[model_name]["correct"] += 1
+                elif model_dir in ("neutral", "mixed") and abs(avg_move) < 1.0:
+                    model_stats[model_name]["correct"] += 1
+
+    if model_stats:
+        lines.append("BY MODEL:")
+        for model, stats in model_stats.items():
+            m_acc = (stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
+            lines.append(f"  {model}: {stats['correct']}/{stats['total']} ({m_acc:.1f}%)")
+        lines.append("")
+
+    # Breakdown by direction
+    dir_stats: dict[str, dict[str, int]] = {}
+    for record in checked:
+        d = record.get("direction", "neutral")
+        if d not in dir_stats:
+            dir_stats[d] = {"total": 0, "correct": 0}
+        dir_stats[d]["total"] += 1
+        if record["correct"]:
+            dir_stats[d]["correct"] += 1
+
+    if dir_stats:
+        lines.append("BY PREDICTED DIRECTION:")
+        for direction, stats in dir_stats.items():
+            d_acc = (stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
+            lines.append(f"  {direction}: {stats['correct']}/{stats['total']} ({d_acc:.1f}%)")
+        lines.append("")
+
+    # Recent predictions
+    recent = sorted(checked, key=lambda r: r.get("timestamp", ""), reverse=True)[:5]
+    if recent:
+        lines.append("RECENT (last 5):")
+        for r in recent:
+            icon = "✅" if r["correct"] else "❌"
+            title = r.get("article_title", "?")[:60]
+            lines.append(f"  {icon} {title}")
+            moves = r.get("actual_moves") or {}
+            if moves:
+                move_str = ", ".join(f"{t}: {v:+.1f}%" for t, v in moves.items())
+                lines.append(f"     Moves: {move_str}")
+
+    pending = sum(1 for r in records if not r.get("checked"))
+    if pending:
+        lines.append(f"\n⏳ {pending} prediction(s) pending verification (< 24h old)")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +342,233 @@ def tg_send_long(chat_id: int | str, text: str) -> bool:
         if not tg_send(chat_id, text[i:i + limit]):
             ok = False
     return ok
+
+
+# ---------------------------------------------------------------------------
+# Scheduled tasks: Daily Summary & Pre-Market Alert
+# ---------------------------------------------------------------------------
+
+
+def _get_current_et() -> datetime:
+    """Get current time in US Eastern Time."""
+    # Use UTC-5 for EST; during EDT it's UTC-4. For simplicity we use
+    # a fixed offset. Production could use pytz/zoneinfo if available.
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York"))
+    except ImportError:
+        return datetime.now(ET_OFFSET)
+
+
+def _copilot_chat(prompt: str, token: str, model: str | None = None) -> str | None:
+    """Send a freeform prompt to Copilot API and return the text response."""
+    payload = {
+        "model": model or config.COPILOT_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a financial markets analyst. Be concise and actionable."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.3,
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Copilot-Integration-Id": "vscode-chat",
+        "Editor-Version": "market-pulse/1.0",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    try:
+        status, resp = http_request(
+            config.COPILOT_API_URL, method="POST", headers=headers, data=body, timeout=60
+        )
+    except Exception as e:
+        logger.error("Copilot chat request failed: %s", e)
+        return None
+    if status != 200:
+        logger.error("Copilot chat returned HTTP %s: %s", status, resp[:300])
+        return None
+    try:
+        parsed = json.loads(resp)
+        return parsed["choices"][0]["message"]["content"]
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        logger.error("Malformed Copilot chat response: %s", e)
+        return None
+
+
+def _send_daily_summary() -> None:
+    """Generate and send the 4:30 PM ET daily market summary."""
+    logger.info("Generating daily market summary…")
+    chat_id = config.TELEGRAM_CHAT_ID
+    try:
+        token = get_copilot_token()
+    except Exception as e:
+        logger.error("Daily summary: failed to get token: %s", e)
+        return
+
+    articles = gather_articles()
+    if not articles:
+        tg_send_long(chat_id, "📊 Daily Summary: No articles found today.")
+        return
+
+    # Analyze top articles for the summary
+    results: list[tuple[Article, dict]] = []
+    cap = min(len(articles), 15)
+    for article in articles[:cap]:
+        try:
+            verdict = analyze_article_dual(article, token)
+        except Exception as e:
+            logger.error("Daily summary analysis error: %s", e)
+            continue
+        if verdict:
+            results.append((article, verdict))
+
+    results.sort(key=lambda x: float(x[1].get("impact_score", 0)), reverse=True)
+    top = results[:8]
+
+    if not top:
+        tg_send_long(chat_id, "📊 Daily Summary: No significant market news today.")
+        return
+
+    # Build summary text for AI to synthesize
+    news_text = "\n".join(
+        f"- {a.title} (Impact: {v.get('impact_score', 0)}/10, "
+        f"Direction: {v.get('direction', 'neutral')}, Tickers: {', '.join(v.get('tickers', []))})"
+        for a, v in top
+    )
+
+    outlook_prompt = (
+        f"Based on today's key market news, provide:\n"
+        f"1. A brief overall market summary (2-3 sentences)\n"
+        f"2. Top 3 movers and why\n"
+        f"3. Tomorrow's outlook and what to watch\n\n"
+        f"Today's news:\n{news_text}"
+    )
+
+    outlook = _copilot_chat(outlook_prompt, token)
+
+    now_et = _get_current_et()
+    lines = [
+        "📊 DAILY MARKET SUMMARY / 每日市场总结",
+        f"🕐 {now_et.strftime('%Y-%m-%d %H:%M ET')}",
+        "═══════════════════════════════════════",
+        "",
+    ]
+
+    if outlook:
+        lines.append(outlook)
+    else:
+        # Fallback: raw top movers
+        lines.append("TOP MOVERS TODAY:")
+        for i, (a, v) in enumerate(top[:5], 1):
+            tickers = ", ".join(v.get("tickers") or []) or "—"
+            lines.append(
+                f"{i}. [{v.get('direction', '?').upper()}] {a.title[:80]}"
+                f"\n   Tickers: {tickers} | Impact: {v.get('impact_score', 0)}/10"
+            )
+
+    lines.append("\n⚠️ AI analysis, not financial advice.")
+    tg_send_long(chat_id, "\n".join(lines))
+    logger.info("Daily summary sent successfully")
+
+
+def _send_premarket_alert() -> None:
+    """Generate and send the 9:00 AM ET pre-market alert."""
+    logger.info("Generating pre-market alert…")
+    chat_id = config.TELEGRAM_CHAT_ID
+    try:
+        token = get_copilot_token()
+    except Exception as e:
+        logger.error("Pre-market alert: failed to get token: %s", e)
+        return
+
+    articles = gather_articles()
+    if not articles:
+        tg_send_long(chat_id, "🌅 Pre-Market: No significant news to report.")
+        return
+
+    # Get recent articles (last 16 hours covers overnight news)
+    news_text = "\n".join(
+        f"- {a.title} (Source: {a.source})"
+        for a in articles[:15]
+    )
+
+    prompt = (
+        f"It's 30 minutes before US market open. Based on overnight/pre-market news, provide:\n"
+        f"1. Key events that could move markets today (earnings, Fed speeches, geopolitical)\n"
+        f"2. Sectors to watch\n"
+        f"3. Key levels or risks\n"
+        f"Be concise and actionable.\n\n"
+        f"Recent headlines:\n{news_text}"
+    )
+
+    analysis = _copilot_chat(prompt, token)
+
+    now_et = _get_current_et()
+    lines = [
+        "🌅 PRE-MARKET ALERT / 盘前提醒",
+        f"🕐 {now_et.strftime('%Y-%m-%d %H:%M ET')}",
+        "═══════════════════════════════════════",
+        "",
+    ]
+
+    if analysis:
+        lines.append(analysis)
+    else:
+        lines.append("Unable to generate analysis. Check recent news manually.")
+
+    lines.append("\n⚠️ AI analysis, not financial advice.")
+    tg_send_long(chat_id, "\n".join(lines))
+    logger.info("Pre-market alert sent successfully")
+
+
+def _scheduler_loop() -> None:
+    """Scheduler thread: triggers daily summary (4:30 PM ET) and pre-market (9:00 AM ET)."""
+    logger.info("Scheduler thread started")
+    last_summary_date: str | None = None
+    last_premarket_date: str | None = None
+    last_accuracy_check: datetime | None = None
+
+    while _running:
+        try:
+            now_et = _get_current_et()
+            today_str = now_et.strftime("%Y-%m-%d")
+            hour, minute = now_et.hour, now_et.minute
+
+            # Daily market summary at 4:30 PM ET (16:30)
+            if hour == 16 and 30 <= minute < 35 and last_summary_date != today_str:
+                last_summary_date = today_str
+                try:
+                    _send_daily_summary()
+                except Exception:
+                    logger.exception("Daily summary failed")
+
+            # Pre-market alert at 9:00 AM ET
+            if hour == 9 and 0 <= minute < 5 and last_premarket_date != today_str:
+                last_premarket_date = today_str
+                try:
+                    _send_premarket_alert()
+                except Exception:
+                    logger.exception("Pre-market alert failed")
+
+            # Check prediction accuracy every 6 hours
+            if last_accuracy_check is None or \
+               (datetime.now(timezone.utc) - last_accuracy_check).total_seconds() > 21600:
+                last_accuracy_check = datetime.now(timezone.utc)
+                try:
+                    _check_predictions()
+                except Exception:
+                    logger.exception("Accuracy check failed")
+
+        except Exception:
+            logger.exception("Scheduler loop error")
+
+        # Sleep 30 seconds between checks
+        for _ in range(30):
+            if not _running:
+                break
+            time.sleep(1)
+
+    logger.info("Scheduler thread stopped")
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +759,141 @@ def handle_status(chat_id: int | str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /ask command
+# ---------------------------------------------------------------------------
+
+
+def handle_ask(chat_id: int | str, question: str) -> None:
+    """Answer a user's freeform market question using Copilot API."""
+    if not question.strip():
+        tg_send(chat_id, "Usage: /ask <your question about markets>\nExample: /ask What's driving tech stocks today?")
+        return
+
+    tg_send(chat_id, "🤔 Thinking…")
+    try:
+        token = get_copilot_token()
+    except Exception as e:
+        tg_send(chat_id, f"❌ Failed to get API token: {e}")
+        return
+
+    # Gather recent headlines for context
+    articles = gather_articles()
+    context = ""
+    if articles:
+        headlines = "\n".join(f"- {a.title}" for a in articles[:10])
+        context = f"\n\nRecent market headlines for context:\n{headlines}"
+
+    prompt = (
+        f"User question about current market conditions: {question}\n"
+        f"{context}\n\n"
+        f"Provide a helpful, concise answer. If the question is about specific stocks, "
+        f"mention relevant recent news. If speculative, note uncertainty."
+    )
+
+    answer = _copilot_chat(prompt, token)
+    if answer:
+        tg_send_long(chat_id, f"💬 {answer}\n\n⚠️ AI analysis, not financial advice.")
+    else:
+        tg_send(chat_id, "❌ Failed to generate an answer. Please try again.")
+
+
+# ---------------------------------------------------------------------------
+# /ticker command
+# ---------------------------------------------------------------------------
+
+
+def handle_ticker(chat_id: int | str, symbol: str) -> None:
+    """Fetch news, price, and AI analysis for a specific stock ticker."""
+    symbol = symbol.strip().upper()
+    if not symbol or not symbol.isalpha() or len(symbol) > 10:
+        tg_send(chat_id, "Usage: /ticker <SYMBOL>\nExample: /ticker NVDA")
+        return
+
+    tg_send(chat_id, f"🔍 Analyzing {symbol}…")
+
+    # Fetch current price via yfinance
+    price_info = ""
+    try:
+        import yfinance as yf
+        stock = yf.Ticker(symbol)
+        hist = stock.history(period="5d")
+        if not hist.empty:
+            current = hist["Close"].iloc[-1]
+            prev = hist["Close"].iloc[-2] if len(hist) >= 2 else current
+            change = ((current - prev) / prev) * 100
+            price_info = (
+                f"💰 {symbol}: ${current:.2f} ({change:+.2f}%)\n"
+                f"   5-day range: ${hist['Close'].min():.2f} – ${hist['Close'].max():.2f}\n"
+                f"   Volume (last): {int(hist['Volume'].iloc[-1]):,}\n"
+            )
+        else:
+            price_info = f"⚠️ No price data found for {symbol}\n"
+    except ImportError:
+        price_info = "⚠️ yfinance not available for price data\n"
+    except Exception as e:
+        price_info = f"⚠️ Price fetch failed: {e}\n"
+
+    # Search for news about this ticker
+    try:
+        token = get_copilot_token()
+    except Exception as e:
+        tg_send(chat_id, f"{price_info}\n❌ Failed to get API token for analysis: {e}")
+        return
+
+    articles = gather_articles()
+    # Filter articles mentioning this ticker
+    relevant = [a for a in articles if symbol in a.title.upper() or symbol in a.summary.upper()]
+    if not relevant:
+        # Broaden: use first few articles as general context
+        relevant = articles[:5]
+
+    news_context = "\n".join(f"- {a.title}" for a in relevant[:8])
+
+    prompt = (
+        f"Provide a brief analysis of {symbol} stock based on recent news and market conditions.\n\n"
+        f"Recent relevant news:\n{news_context}\n\n"
+        f"Current price info: {price_info}\n\n"
+        f"Include: 1) What's driving the stock, 2) Key risks, 3) Short-term outlook.\n"
+        f"Be concise (5-8 sentences max)."
+    )
+
+    analysis = _copilot_chat(prompt, token)
+
+    lines = [
+        f"📈 TICKER ANALYSIS: {symbol}",
+        "═══════════════════════════════",
+        price_info,
+    ]
+
+    if relevant and any(symbol in a.title.upper() for a in relevant):
+        lines.append("📰 RECENT NEWS:")
+        for a in relevant[:3]:
+            if symbol in a.title.upper():
+                lines.append(f"  • {a.title[:80]}")
+        lines.append("")
+
+    if analysis:
+        lines.append("🤖 AI ANALYSIS:")
+        lines.append(analysis)
+    else:
+        lines.append("❌ Could not generate AI analysis.")
+
+    lines.append("\n⚠️ AI analysis, not financial advice.")
+    tg_send_long(chat_id, "\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# /accuracy command
+# ---------------------------------------------------------------------------
+
+
+def handle_accuracy(chat_id: int | str) -> None:
+    """Show prediction accuracy statistics."""
+    stats = _get_accuracy_stats()
+    tg_send_long(chat_id, stats)
+
+
+# ---------------------------------------------------------------------------
 # Background analysis (runs every BACKGROUND_INTERVAL seconds)
 # ---------------------------------------------------------------------------
 
@@ -325,9 +901,7 @@ def handle_status(chat_id: int | str) -> None:
 def _run_analysis() -> None:
     """Run the market_pulse pipeline once (fetch → analyze → notify).
 
-    Mirrors what market_pulse.py's main loop would do: acquire the file lock
-    to stay safe against concurrent cron invocations, then process only
-    unseen articles and send Telegram alerts for high-impact ones.
+    Enhanced version that also records predictions for accuracy tracking.
     """
     logger.info("Background analysis: starting run")
     with _analysis_lock:
@@ -340,7 +914,8 @@ def _run_analysis() -> None:
             seen = load_seen()
             articles = gather_articles()
             if articles:
-                notified = mp_process(articles, seen, token)
+                # Process articles and track high-impact predictions
+                notified = _process_with_tracking(articles, seen, token)
                 save_seen(seen)
                 logger.info("Background analysis: done — %s notifications sent", notified)
             else:
@@ -350,6 +925,34 @@ def _run_analysis() -> None:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+
+def _process_with_tracking(articles, seen, token) -> int:
+    """Process articles like mp_process but also record predictions for accuracy."""
+    notified = 0
+    processed = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for article in articles:
+        if article.id in seen:
+            continue
+        if processed >= config.MAX_ARTICLES_PER_RUN:
+            break
+        processed += 1
+        logger.info("Analyzing: %s", article.title[:120])
+        verdict = analyze_article_dual(article, token)
+        seen[article.id] = now_iso
+        if verdict is None:
+            continue
+        if verdict.get("notify"):
+            if mp_send_telegram(article, verdict):
+                notified += 1
+                # Record prediction for accuracy tracking
+                _record_prediction(verdict, article.title)
+                logger.info("Notification sent for: %s", article.title[:120])
+            else:
+                logger.warning("Failed to send notification for: %s", article.title[:120])
+    return notified
 
 
 def _background_loop() -> None:
@@ -383,16 +986,36 @@ def handle_update(update: dict) -> None:
     elif text == "/status" or text.startswith("/status@"):
         logger.info("/status from chat %s", chat_id)
         handle_status(chat_id)
+    elif text.startswith("/ask"):
+        logger.info("/ask from chat %s", chat_id)
+        # Extract the question after "/ask" or "/ask@botname"
+        parts = text.split(None, 1)
+        question = parts[1] if len(parts) > 1 else ""
+        handle_ask(chat_id, question)
+    elif text.startswith("/ticker"):
+        logger.info("/ticker from chat %s", chat_id)
+        parts = text.split(None, 1)
+        symbol = parts[1] if len(parts) > 1 else ""
+        handle_ticker(chat_id, symbol)
+    elif text == "/accuracy" or text.startswith("/accuracy@"):
+        logger.info("/accuracy from chat %s", chat_id)
+        handle_accuracy(chat_id)
     elif text == "/start" or text.startswith("/start@"):
         tg_send(chat_id,
                 "👋 Market Pulse Bot ready!\n\n"
                 "/report — Generate market analysis report\n"
-                "/status — Show bot status and uptime")
+                "/status — Show bot status and uptime\n"
+                "/ask <question> — Ask about market conditions\n"
+                "/ticker <SYMBOL> — Analyze a specific stock\n"
+                "/accuracy — Show prediction accuracy stats")
     elif text.startswith("/"):
         tg_send(chat_id,
                 "Unknown command. Available:\n"
                 "/report — Generate market analysis report\n"
-                "/status — Show bot status and uptime")
+                "/status — Show bot status and uptime\n"
+                "/ask <question> — Ask about market conditions\n"
+                "/ticker <SYMBOL> — Analyze a specific stock\n"
+                "/accuracy — Show prediction accuracy stats")
 
 
 def main() -> None:
@@ -416,6 +1039,9 @@ def main() -> None:
 
     bg_thread = threading.Thread(target=_background_loop, name="analysis-bg", daemon=True)
     bg_thread.start()
+
+    sched_thread = threading.Thread(target=_scheduler_loop, name="scheduler", daemon=True)
+    sched_thread.start()
 
     while _running:
         try:
