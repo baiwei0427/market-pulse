@@ -20,6 +20,7 @@ import signal
 import sys
 import threading
 import time
+import zoneinfo
 from datetime import datetime, timedelta, timezone
 
 import config
@@ -54,7 +55,7 @@ _analysis_lock = threading.Lock()
 BACKGROUND_INTERVAL = 600  # seconds between automatic analysis runs
 
 # Eastern Time offset helpers
-ET_OFFSET = timezone(timedelta(hours=-5))  # EST (EDT is -4)
+ET_OFFSET = zoneinfo.ZoneInfo('America/New_York')
 
 ACCURACY_FILE = os.path.join(config.BASE_DIR, "accuracy.json")
 
@@ -168,6 +169,8 @@ def _check_predictions() -> None:
                 # Compare close prices: day of prediction vs next day
                 price_before = hist["Close"].iloc[-2]
                 price_after = hist["Close"].iloc[-1]
+                if price_before == 0:
+                    continue
                 pct_change = ((price_after - price_before) / price_before) * 100
                 actual_moves[ticker] = round(pct_change, 2)
 
@@ -196,24 +199,17 @@ def _check_predictions() -> None:
                     sum(1 for r in records if r.get("checked")))
 
 
-def _get_accuracy_stats() -> str:
+def _get_accuracy_stats() -> dict:
     """Generate accuracy statistics report."""
     records = _load_accuracy()
     checked = [r for r in records if r.get("checked") and r.get("correct") is not None]
 
     if not checked:
-        return "📊 No accuracy data yet. Predictions need 24+ hours to be verified."
+        return {"overall": 0.0, "total": 0, "correct": 0, "pending": 0}
 
     total = len(checked)
     correct = sum(1 for r in checked if r["correct"])
     accuracy = (correct / total * 100) if total > 0 else 0
-
-    lines = [
-        "📊 PREDICTION ACCURACY STATS",
-        f"═══════════════════════════════",
-        f"Overall: {correct}/{total} correct ({accuracy:.1f}%)",
-        "",
-    ]
 
     # Breakdown by model
     model_stats: dict[str, dict[str, int]] = {}
@@ -235,13 +231,6 @@ def _get_accuracy_stats() -> str:
                 elif model_dir in ("neutral", "mixed") and abs(avg_move) < 1.0:
                     model_stats[model_name]["correct"] += 1
 
-    if model_stats:
-        lines.append("BY MODEL:")
-        for model, stats in model_stats.items():
-            m_acc = (stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
-            lines.append(f"  {model}: {stats['correct']}/{stats['total']} ({m_acc:.1f}%)")
-        lines.append("")
-
     # Breakdown by direction
     dir_stats: dict[str, dict[str, int]] = {}
     for record in checked:
@@ -252,31 +241,16 @@ def _get_accuracy_stats() -> str:
         if record["correct"]:
             dir_stats[d]["correct"] += 1
 
-    if dir_stats:
-        lines.append("BY PREDICTED DIRECTION:")
-        for direction, stats in dir_stats.items():
-            d_acc = (stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
-            lines.append(f"  {direction}: {stats['correct']}/{stats['total']} ({d_acc:.1f}%)")
-        lines.append("")
-
-    # Recent predictions
-    recent = sorted(checked, key=lambda r: r.get("timestamp", ""), reverse=True)[:5]
-    if recent:
-        lines.append("RECENT (last 5):")
-        for r in recent:
-            icon = "✅" if r["correct"] else "❌"
-            title = r.get("article_title", "?")[:60]
-            lines.append(f"  {icon} {title}")
-            moves = r.get("actual_moves") or {}
-            if moves:
-                move_str = ", ".join(f"{t}: {v:+.1f}%" for t, v in moves.items())
-                lines.append(f"     Moves: {move_str}")
-
     pending = sum(1 for r in records if not r.get("checked"))
-    if pending:
-        lines.append(f"\n⏳ {pending} prediction(s) pending verification (< 24h old)")
 
-    return "\n".join(lines)
+    return {
+        "overall": accuracy,
+        "correct": correct,
+        "total": total,
+        "pending": pending,
+        "by_model": model_stats,
+        "by_direction": dir_stats,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -405,22 +379,23 @@ def _send_daily_summary() -> None:
         logger.error("Daily summary: failed to get token: %s", e)
         return
 
-    articles = gather_articles()
-    if not articles:
-        tg_send_long(chat_id, "📊 Daily Summary: No articles found today.")
-        return
+    with _analysis_lock:
+        articles = gather_articles()
+        if not articles:
+            tg_send_long(chat_id, "📊 Daily Summary: No articles found today.")
+            return
 
-    # Analyze top articles for the summary
-    results: list[tuple[Article, dict]] = []
-    cap = min(len(articles), 15)
-    for article in articles[:cap]:
-        try:
-            verdict = analyze_article_dual(article, token)
-        except Exception as e:
-            logger.error("Daily summary analysis error: %s", e)
-            continue
-        if verdict:
-            results.append((article, verdict))
+        # Analyze top articles for the summary
+        results: list[tuple[Article, dict]] = []
+        cap = min(len(articles), 15)
+        for article in articles[:cap]:
+            try:
+                verdict = analyze_article_dual(article, token)
+            except Exception as e:
+                logger.error("Daily summary analysis error: %s", e)
+                continue
+            if verdict:
+                results.append((article, verdict))
 
     results.sort(key=lambda x: float(x[1].get("impact_score", 0)), reverse=True)
     top = results[:8]
@@ -487,22 +462,23 @@ def _send_premarket_alert() -> None:
 
     # Fresh fetch — deliberately bypasses the seen-articles store so we always
     # analyse the most recent overnight headlines regardless of prior runs.
-    articles = gather_articles()
-    if not articles:
-        tg_send_long(chat_id, "🌅 Pre-Market: No significant news to report.")
-        return
+    with _analysis_lock:
+        articles = gather_articles()
+        if not articles:
+            tg_send_long(chat_id, "🌅 Pre-Market: No significant news to report.")
+            return
 
-    # AI-analyse the top articles to surface genuine market-movers.
-    results: list[tuple[Article, dict]] = []
-    cap = min(len(articles), 12)
-    for article in articles[:cap]:
-        try:
-            verdict = analyze_article_dual(article, token)
-        except Exception as e:
-            logger.error("Pre-market analysis error: %s", e)
-            continue
-        if verdict:
-            results.append((article, verdict))
+        # AI-analyse the top articles to surface genuine market-movers.
+        results: list[tuple[Article, dict]] = []
+        cap = min(len(articles), 12)
+        for article in articles[:cap]:
+            try:
+                verdict = analyze_article_dual(article, token)
+            except Exception as e:
+                logger.error("Pre-market analysis error: %s", e)
+                continue
+            if verdict:
+                results.append((article, verdict))
 
     results.sort(key=lambda x: float(x[1].get("impact_score", 0)), reverse=True)
     top = results[:6]
@@ -692,7 +668,7 @@ def handle_report(chat_id: int | str) -> None:
         # Build report
         lines = [
             "📊 MARKET PULSE REPORT / 市场脉搏报告",
-            f"🕐 {datetime.now(timezone(timedelta(hours=-7))).strftime('%Y-%m-%d %H:%M PST')}",
+            f"🕐 {_get_current_et().strftime('%Y-%m-%d %H:%M ET')}",
             f"📰 {len(articles)} articles scanned, {analyzed} analyzed",
             "",
             f"🎯 Overall Sentiment / 总体情绪: {dominant.upper()} / {dominant_zh.get(dominant, dominant)}",
@@ -931,7 +907,37 @@ def handle_ticker(chat_id: int | str, symbol: str) -> None:
 def handle_accuracy(chat_id: int | str) -> None:
     """Show prediction accuracy statistics."""
     stats = _get_accuracy_stats()
-    tg_send_long(chat_id, stats)
+    
+    if stats["total"] == 0:
+        msg = "📊 No accuracy data yet. Predictions need 24+ hours to be verified."
+    else:
+        lines = [
+            "📊 PREDICTION ACCURACY STATS",
+            f"═══════════════════════════════",
+            f"Overall: {stats['correct']}/{stats['total']} correct ({stats['overall']:.1f}%)",
+            "",
+        ]
+
+        if stats["by_model"]:
+            lines.append("BY MODEL:")
+            for model, st in stats["by_model"].items():
+                m_acc = (st["correct"] / st["total"] * 100) if st["total"] > 0 else 0
+                lines.append(f"  {model}: {st['correct']}/{st['total']} ({m_acc:.1f}%)")
+            lines.append("")
+
+        if stats["by_direction"]:
+            lines.append("BY PREDICTED DIRECTION:")
+            for direction, st in stats["by_direction"].items():
+                d_acc = (st["correct"] / st["total"] * 100) if st["total"] > 0 else 0
+                lines.append(f"  {direction}: {st['correct']}/{st['total']} ({d_acc:.1f}%)")
+            lines.append("")
+
+        if stats["pending"]:
+            lines.append(f"⏳ {stats['pending']} prediction(s) pending verification (< 24h old)")
+
+        msg = "\n".join(lines)
+
+    tg_send_long(chat_id, msg)
 
 
 # ---------------------------------------------------------------------------
