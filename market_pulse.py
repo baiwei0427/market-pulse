@@ -681,5 +681,12 @@ def process(
                 logger.info("Notification sent for: %s", article.title[:120])
             else:
                 logger.warning("Failed to send notification for: %s", article.title[:120])
+        elif article.source == "Truth Social":
+            # Always send Trump's Truth Social posts regardless of impact score
+            if send_telegram(article, verdict):
+                notified += 1
+                logger.info("Truth Social notification sent for: %s", article.title[:120])
+            else:
+                logger.warning("Failed to send Truth Social notification for: %s", article.title[:120])
             # Execute paper trade regardless of Telegram delivery — the
             # verdict was high-impact and that's what gates trading.
