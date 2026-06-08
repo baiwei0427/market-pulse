@@ -38,6 +38,9 @@ RSS_FEEDS = [
     # "https://nitter.privacydev.net/federalreserve/rss",
 ]
 
+SCRAPECREATORS_API_KEY = os.environ.get("SCRAPECREATORS_API_KEY", "YOUR_KEY_HERE")
+TRUTH_SOCIAL_ENABLED = SCRAPECREATORS_API_KEY != "YOUR_KEY_HERE"
+
 # --- Files ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SEEN_FILE = os.path.join(BASE_DIR, "seen_articles.json")

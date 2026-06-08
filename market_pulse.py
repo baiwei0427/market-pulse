@@ -8,8 +8,10 @@ Pipeline:
      classify expected stock-market impact and recommend an action.
   4. If the AI returns a high-impact verdict, push a Telegram notification.
 
-Designed to be run from cron every 5 minutes. Safe to invoke concurrently
-thanks to a file lock; failures are logged but never raised to cron.
+Designed to be run from cron every 30 minutes for Truth Social quota control.
+Google News remains the primary source and Truth Social is a supplement.
+Safe to invoke concurrently thanks to a file lock; failures are logged but
+never raised to cron.
 """
 
 from __future__ import annotations
@@ -194,53 +196,91 @@ def fetch_feed(url: str) -> list[Article]:
 
 
 def fetch_truth_social() -> list[Article]:
-    """Fetch recent Trump posts from Truth Social and normalize them as Article objects."""
+    """Fetch recent Trump posts from ScrapeCreators Truth Social and normalize them as Article objects."""
+    if not config.TRUTH_SOCIAL_ENABLED:
+        logger.info("Truth Social supplement disabled; skipping ScrapeCreators fetch")
+        return []
+
+    url = "https://api.scrapecreators.com/v1/truthsocial/user/posts?handle=realDonaldTrump&limit=20"
+    headers = {"x-api-key": config.SCRAPECREATORS_API_KEY}
+
     try:
-        status, body = http_request(config.TRUTH_SOCIAL_API_URL)
+        status, body = http_request(url, headers=headers)
         if status == 429:
-            logger.warning("Truth Social API returned HTTP 429 (rate limited); skipping")
+            logger.warning("ScrapeCreators Truth Social API returned HTTP 429 (rate limited); skipping")
+            return []
+        if status == 401 or status == 403:
+            logger.warning("ScrapeCreators Truth Social API authentication failed (HTTP %s); skipping", status)
             return []
         if status != 200:
-            logger.warning("Truth Social API returned HTTP %s; skipping", status)
+            logger.warning("ScrapeCreators Truth Social API returned HTTP %s; skipping", status)
             return []
     except Exception as e:
-        logger.warning("Failed to fetch Truth Social posts: %s; skipping", e)
+        logger.warning("Failed to fetch ScrapeCreators Truth Social posts: %s; skipping", e)
         return []
 
     try:
         payload = json.loads(body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as e:
-        logger.warning("Failed to parse Truth Social JSON: %s", e)
+        logger.warning("Failed to parse ScrapeCreators Truth Social JSON: %s", e)
         return []
 
-    if not isinstance(payload, list):
-        logger.warning("Truth Social API returned non-array payload; skipping")
+    items = payload
+    if isinstance(payload, dict):
+        for key in ("posts", "data", "results", "items", "statuses"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                items = value
+                break
+        else:
+            logger.warning("ScrapeCreators Truth Social API returned unsupported payload shape; skipping")
+            return []
+
+    if not isinstance(items, list):
+        logger.warning("ScrapeCreators Truth Social API returned non-array payload; skipping")
         return []
 
     articles: list[Article] = []
-    for item in payload:
+    for item in items:
         if not isinstance(item, dict):
             continue
 
-        content_html = item.get("content") or ""
-        text = _clean_text(content_html)
+        text = _clean_text(
+            item.get("text")
+            or item.get("content")
+            or item.get("body")
+            or item.get("post")
+            or item.get("message")
+            or ""
+        )
         if not text:
             continue
 
-        status_id = item.get("id")
+        status_id = item.get("id") or item.get("status_id") or item.get("post_id")
         if status_id is None:
             continue
 
-        link = f"https://truthsocial.com/@realDonaldTrump/status/{status_id}"
+        link = (
+            item.get("url")
+            or item.get("link")
+            or item.get("permalink")
+            or f"https://truthsocial.com/@realDonaldTrump/status/{status_id}"
+        )
         title = text if len(text) <= 120 else text[:117] + "..."
-        published = item.get("created_at") or ""
+        published = (
+            item.get("created_at")
+            or item.get("published_at")
+            or item.get("createdAt")
+            or item.get("timestamp")
+            or ""
+        )
 
         articles.append(
             Article(
                 id=_article_id(link, title),
                 title=title,
                 link=link,
-                source="Truth Social",
+                source=item.get("source") or "Truth Social",
                 published=published,
                 summary=text,
             )
@@ -260,11 +300,31 @@ def gather_articles() -> list[Article]:
             seen_ids.add(a.id)
             all_items.append(a)
 
-    for a in fetch_truth_social():
-        if a.id in seen_ids:
-            continue
-        seen_ids.add(a.id)
-        all_items.append(a)
+    # Truth Social: only fetch every 12 hours to conserve API credits
+    _ts_interval = 43200  # 12 hours
+    _ts_last_file = os.path.join(config.BASE_DIR, ".truth_social_last")
+    _ts_should_fetch = True
+    if os.path.exists(_ts_last_file):
+        try:
+            last_ts = float(open(_ts_last_file).read().strip())
+            if time.time() - last_ts < _ts_interval:
+                _ts_should_fetch = False
+        except Exception:
+            pass
+
+    if _ts_should_fetch:
+        for a in fetch_truth_social():
+            if a.id in seen_ids:
+                continue
+            seen_ids.add(a.id)
+            all_items.append(a)
+        try:
+            with open(_ts_last_file, "w") as f:
+                f.write(str(time.time()))
+        except Exception:
+            pass
+    else:
+        logger.debug("Truth Social: skipping (last fetch < 12h ago)")
 
     logger.info(
         "Gathered %d unique articles from %d feeds plus Truth Social",
