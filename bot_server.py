@@ -412,10 +412,10 @@ def _send_daily_summary() -> None:
     )
 
     outlook_prompt = (
-        f"Based on today's key market news, provide:\n"
-        f"1. A brief overall market summary (2-3 sentences)\n"
-        f"2. Top 3 movers and why\n"
-        f"3. Tomorrow's outlook and what to watch\n\n"
+        f"Based on today's key market news, provide in BOTH English and Chinese (中文):\n"
+        f"1. A brief overall market summary (2-3 sentences) / 市场总结\n"
+        f"2. Top 3 movers and why / 三大热门股及原因\n"
+        f"3. Tomorrow's outlook and what to watch / 明日展望\n\n"
         f"Today's news:\n{news_text}"
     )
 
@@ -497,10 +497,10 @@ def _send_premarket_alert() -> None:
 
     prompt = (
         "It's 30 minutes before US market open. Based on these pre-scored overnight "
-        "headlines, provide:\n"
-        "1. Key events that could move markets today\n"
-        "2. Sectors and tickers to watch\n"
-        "3. Key risks or catalysts\n"
+        "headlines, provide in BOTH English and Chinese (中文):\n"
+        "1. Key events that could move markets today / 今日可能影响市场的关键事件\n"
+        "2. Sectors and tickers to watch / 值得关注的行业和股票\n"
+        "3. Key risks or catalysts / 关键风险或催化剂\n"
         "Be concise and actionable.\n\n"
         f"Scored headlines:\n{news_text}"
     )
