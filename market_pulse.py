@@ -193,16 +193,84 @@ def fetch_feed(url: str) -> list[Article]:
     return items
 
 
+def fetch_truth_social() -> list[Article]:
+    """Fetch recent Trump posts from Truth Social and normalize them as Article objects."""
+    try:
+        status, body = http_request(config.TRUTH_SOCIAL_API_URL)
+        if status == 429:
+            logger.warning("Truth Social API returned HTTP 429 (rate limited); skipping")
+            return []
+        if status != 200:
+            logger.warning("Truth Social API returned HTTP %s; skipping", status)
+            return []
+    except Exception as e:
+        logger.warning("Failed to fetch Truth Social posts: %s; skipping", e)
+        return []
+
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        logger.warning("Failed to parse Truth Social JSON: %s", e)
+        return []
+
+    if not isinstance(payload, list):
+        logger.warning("Truth Social API returned non-array payload; skipping")
+        return []
+
+    articles: list[Article] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+
+        content_html = item.get("content") or ""
+        text = _clean_text(content_html)
+        if not text:
+            continue
+
+        status_id = item.get("id")
+        if status_id is None:
+            continue
+
+        link = f"https://truthsocial.com/@realDonaldTrump/status/{status_id}"
+        title = text if len(text) <= 120 else text[:117] + "..."
+        published = item.get("created_at") or ""
+
+        articles.append(
+            Article(
+                id=_article_id(link, title),
+                title=title,
+                link=link,
+                source="Truth Social",
+                published=published,
+                summary=text,
+            )
+        )
+
+    return articles
+
+
 def gather_articles() -> list[Article]:
     seen_ids: set[str] = set()
     all_items: list[Article] = []
+
     for url in config.RSS_FEEDS:
         for a in fetch_feed(url):
             if a.id in seen_ids:
                 continue
             seen_ids.add(a.id)
             all_items.append(a)
-    logger.info("Gathered %d unique articles from %d feeds", len(all_items), len(config.RSS_FEEDS))
+
+    for a in fetch_truth_social():
+        if a.id in seen_ids:
+            continue
+        seen_ids.add(a.id)
+        all_items.append(a)
+
+    logger.info(
+        "Gathered %d unique articles from %d feeds plus Truth Social",
+        len(all_items),
+        len(config.RSS_FEEDS),
+    )
     return all_items
 
 
