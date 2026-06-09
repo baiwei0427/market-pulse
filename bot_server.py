@@ -283,6 +283,11 @@ def tg_get_updates(offset: int | None = None, timeout: int = 30) -> list[dict]:
     return []
 
 
+def _bilingual(en: str, zh: str) -> str:
+    """Return an English/Chinese pair for Telegram replies."""
+    return f"{en}\n{zh}"
+
+
 def tg_send(chat_id: int | str, text: str) -> bool:
     """Send a plain-text message to a specific chat."""
     url = f"{_BASE_URL}/sendMessage"
@@ -382,7 +387,13 @@ def _send_daily_summary() -> None:
     with _analysis_lock:
         articles = gather_articles()
         if not articles:
-            tg_send_long(chat_id, "📊 Daily Summary: No articles found today.")
+            tg_send_long(
+                chat_id,
+                _bilingual(
+                    "📊 Daily Summary: No articles found today.",
+                    "📊 每日总结：今天没有找到文章。",
+                ),
+            )
             return
 
         # Analyze top articles for the summary
@@ -401,7 +412,13 @@ def _send_daily_summary() -> None:
     top = results[:8]
 
     if not top:
-        tg_send_long(chat_id, "📊 Daily Summary: No significant market news today.")
+        tg_send_long(
+            chat_id,
+            _bilingual(
+                "📊 Daily Summary: No significant market news today.",
+                "📊 每日总结：今天没有重大市场新闻。",
+            ),
+        )
         return
 
     # Build summary text for AI to synthesize
@@ -433,15 +450,16 @@ def _send_daily_summary() -> None:
         lines.append(outlook)
     else:
         # Fallback: raw top movers
-        lines.append("TOP MOVERS TODAY:")
+        lines.append("TOP MOVERS TODAY / 今日主要走势：")
         for i, (a, v) in enumerate(top[:5], 1):
             tickers = ", ".join(v.get("tickers") or []) or "—"
             lines.append(
                 f"{i}. [{v.get('direction', '?').upper()}] {a.title[:80]}"
                 f"\n   Tickers: {tickers} | Impact: {v.get('impact_score', 0)}/10"
+                f"\n   股票：{tickers} | 影响：{v.get('impact_score', 0)}/10"
             )
 
-    lines.append("\n⚠️ AI analysis, not financial advice.")
+    lines.append("\n⚠️ AI analysis, not financial advice. / ⚠️ AI 分析，仅供参考，不构成投资建议。")
     tg_send_long(chat_id, "\n".join(lines))
     logger.info("Daily summary sent successfully")
 
@@ -465,7 +483,13 @@ def _send_premarket_alert() -> None:
     with _analysis_lock:
         articles = gather_articles()
         if not articles:
-            tg_send_long(chat_id, "🌅 Pre-Market: No significant news to report.")
+            tg_send_long(
+                chat_id,
+                _bilingual(
+                    "🌅 Pre-Market Alert: No significant news to report.",
+                    "🌅 盘前提醒：今天没有值得报告的重大新闻。",
+                ),
+            )
             return
 
         # AI-analyse the top articles to surface genuine market-movers.
@@ -519,15 +543,16 @@ def _send_premarket_alert() -> None:
         lines.append(analysis)
     else:
         # Fallback: list top movers directly
-        lines.append("TOP PRE-MARKET MOVERS:")
+        lines.append("TOP PRE-MARKET MOVERS / 盘前主要走势：")
         for i, (a, v) in enumerate(top[:5], 1):
             tickers = ", ".join(v.get("tickers") or []) or "—"
             lines.append(
                 f"{i}. [{v.get('direction', '?').upper()}] {a.title[:80]}"
                 f"\n   Tickers: {tickers} | Impact: {v.get('impact_score', 0)}/10"
+                f"\n   股票：{tickers} | 影响：{v.get('impact_score', 0)}/10"
             )
 
-    lines.append("\n⚠️ AI analysis, not financial advice.")
+    lines.append("\n⚠️ AI analysis, not financial advice. / ⚠️ AI 分析，仅供参考，不构成投资建议。")
     tg_send_long(chat_id, "\n".join(lines))
     logger.info("Pre-market alert sent successfully")
 
@@ -593,23 +618,47 @@ def _scheduler_loop() -> None:
 
 def handle_report(chat_id: int | str) -> None:
     global _last_report
-    tg_send(chat_id, "⏳ Fetching news and analyzing… this may take a minute.")
+    tg_send(
+        chat_id,
+        _bilingual(
+            "⏳ Fetching news and analyzing… this may take a minute.",
+            "⏳ 正在抓取新闻并分析… 这可能需要一分钟。",
+        ),
+    )
 
     with _analysis_lock:
         try:
             token = get_copilot_token()
         except Exception as e:
-            tg_send(chat_id, f"❌ Failed to get API token: {e}")
+            tg_send(
+                chat_id,
+                _bilingual(
+                    f"❌ Failed to get API token: {e}",
+                    f"❌ 获取 API Token 失败：{e}",
+                ),
+            )
             return
 
         articles = gather_articles()
         if not articles:
-            tg_send(chat_id, "No articles found from RSS feeds.")
+            tg_send(
+                chat_id,
+                _bilingual(
+                    "No articles found from RSS feeds.",
+                    "RSS feed 中没有找到文章。",
+                ),
+            )
             _last_report = {"time": datetime.now(timezone.utc).isoformat(), "articles": 0}
             return
 
         # Analyze all articles (up to 20) and rank by impact
-        tg_send(chat_id, f"📰 Found {len(articles)} articles. Analyzing top candidates…")
+        tg_send(
+            chat_id,
+            _bilingual(
+                f"📰 Found {len(articles)} articles. Analyzing top candidates…",
+                f"📰 找到 {len(articles)} 篇文章。正在分析候选热点…",
+            ),
+        )
 
         results: list[tuple[Article, dict]] = []
         analyzed = 0
@@ -631,7 +680,13 @@ def handle_report(chat_id: int | str) -> None:
         top = results[:10]
 
         if not top:
-            tg_send(chat_id, "Analysis complete but no articles produced valid results.")
+            tg_send(
+                chat_id,
+                _bilingual(
+                    "Analysis complete but no articles produced valid results.",
+                    "分析完成，但没有文章产生有效结果。",
+                ),
+            )
             _last_report = {
                 "time": datetime.now(timezone.utc).isoformat(),
                 "articles": len(articles),
@@ -751,25 +806,25 @@ def handle_report(chat_id: int | str) -> None:
 
 def handle_status(chat_id: int | str) -> None:
     lines = [
-        "🤖 Market Pulse Bot Status",
-        f"⏱ Uptime: {_uptime()}",
-        f"🚀 Started: {_start_time.strftime('%Y-%m-%d %H:%M UTC')}",
+        "🤖 Market Pulse Bot Status / 机器人状态",
+        f"⏱ Uptime: {_uptime()} / 运行时长：{_uptime()}",
+        f"🚀 Started: {_start_time.strftime('%Y-%m-%d %H:%M UTC')} / 启动时间：{_start_time.strftime('%Y-%m-%d %H:%M UTC')}",
     ]
     if _last_report:
-        lines.append(f"\n📊 Last report: {_last_report.get('time', 'n/a')}")
-        lines.append(f"   Articles found: {_last_report.get('articles', 0)}")
-        lines.append(f"   Analyzed: {_last_report.get('analyzed', 0)}")
-        lines.append(f"   Top results: {_last_report.get('top', 0)}")
-        lines.append(f"   Sentiment: {_last_report.get('sentiment', 'n/a')}")
+        lines.append(f"\n📊 Last report: {_last_report.get('time', 'n/a')} / 上次报告：{_last_report.get('time', 'n/a')}")
+        lines.append(f"   Articles found: {_last_report.get('articles', 0)} / 找到文章：{_last_report.get('articles', 0)}")
+        lines.append(f"   Analyzed: {_last_report.get('analyzed', 0)} / 已分析：{_last_report.get('analyzed', 0)}")
+        lines.append(f"   Top results: {_last_report.get('top', 0)} / 热点结果：{_last_report.get('top', 0)}")
+        lines.append(f"   Sentiment: {_last_report.get('sentiment', 'n/a')} / 情绪：{_last_report.get('sentiment', 'n/a')}")
         buy = _last_report.get("buy_tickers", [])
         sell = _last_report.get("sell_tickers", [])
         if buy:
-            lines.append(f"   Buy tickers: {', '.join(buy)}")
+            lines.append(f"   Buy tickers: {', '.join(buy)} / 买入标的：{', '.join(buy)}")
         if sell:
-            lines.append(f"   Sell tickers: {', '.join(sell)}")
+            lines.append(f"   Sell tickers: {', '.join(sell)} / 卖出标的：{', '.join(sell)}")
     else:
-        lines.append("\nNo report has been run yet.")
-    lines.append(f"\nModels: {config.COPILOT_MODEL} + {config.COPILOT_MODEL_2}")
+        lines.append("\nNo report has been run yet. / 尚未执行过报告。")
+    lines.append(f"\nModels: {config.COPILOT_MODEL} + {config.COPILOT_MODEL_2} / 模型：{config.COPILOT_MODEL} + {config.COPILOT_MODEL_2}")
     tg_send(chat_id, "\n".join(lines))
 
 
@@ -781,14 +836,20 @@ def handle_status(chat_id: int | str) -> None:
 def handle_ask(chat_id: int | str, question: str) -> None:
     """Answer a user's freeform market question using Copilot API."""
     if not question.strip():
-        tg_send(chat_id, "Usage: /ask <your question about markets>\nExample: /ask What's driving tech stocks today?")
+        tg_send(
+            chat_id,
+            _bilingual(
+                "Usage: /ask <your question about markets>\nExample: /ask What's driving tech stocks today?",
+                "用法：/ask <你关于市场的问题>\n示例：/ask 今天科技股是怎么走的？",
+            ),
+        )
         return
 
-    tg_send(chat_id, "🤔 Thinking…")
+    tg_send(chat_id, _bilingual("🤔 Thinking…", "🤔 正在思考…"))
     try:
         token = get_copilot_token()
     except Exception as e:
-        tg_send(chat_id, f"❌ Failed to get API token: {e}")
+        tg_send(chat_id, _bilingual(f"❌ Failed to get API token: {e}", f"❌ 获取 API Token 失败：{e}"))
         return
 
     # Gather recent headlines for context
@@ -801,15 +862,28 @@ def handle_ask(chat_id: int | str, question: str) -> None:
     prompt = (
         f"User question about current market conditions: {question}\n"
         f"{context}\n\n"
-        f"Provide a helpful, concise answer. If the question is about specific stocks, "
-        f"mention relevant recent news. If speculative, note uncertainty."
+        f"Provide a helpful, concise answer in BOTH English and Chinese (中文). "
+        f"If the question is about specific stocks, mention relevant recent news. "
+        f"If speculative, note uncertainty."
     )
 
     answer = _copilot_chat(prompt, token, model="claude-opus-4.6")
     if answer:
-        tg_send_long(chat_id, f"💬 {answer}\n\n⚠️ AI analysis, not financial advice.")
+        tg_send_long(
+            chat_id,
+            _bilingual(
+                f"💬 {answer}\n\n⚠️ AI analysis, not financial advice.",
+                f"💬 {answer}\n\n⚠️ AI 分析，仅供参考，不构成投资建议。",
+            ),
+        )
     else:
-        tg_send(chat_id, "❌ Failed to generate an answer. Please try again.")
+        tg_send(
+            chat_id,
+            _bilingual(
+                "❌ Failed to generate an answer. Please try again.",
+                "❌ 无法生成回答，请重试。",
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -821,10 +895,16 @@ def handle_ticker(chat_id: int | str, symbol: str) -> None:
     """Fetch news, price, and AI analysis for a specific stock ticker."""
     symbol = symbol.strip().upper()
     if not symbol or not symbol.isalpha() or len(symbol) > 10:
-        tg_send(chat_id, "Usage: /ticker <SYMBOL>\nExample: /ticker NVDA")
+        tg_send(
+            chat_id,
+            _bilingual(
+                "Usage: /ticker <SYMBOL>\nExample: /ticker NVDA",
+                "用法：/ticker <股票代码>\n示例：/ticker NVDA",
+            ),
+        )
         return
 
-    tg_send(chat_id, f"🔍 Analyzing {symbol}…")
+    tg_send(chat_id, _bilingual(f"🔍 Analyzing {symbol}…", f"🔍 正在分析 {symbol}…"))
 
     # Fetch current price via yfinance
     price_info = ""
@@ -840,19 +920,36 @@ def handle_ticker(chat_id: int | str, symbol: str) -> None:
                 f"💰 {symbol}: ${current:.2f} ({change:+.2f}%)\n"
                 f"   5-day range: ${hist['Close'].min():.2f} – ${hist['Close'].max():.2f}\n"
                 f"   Volume (last): {int(hist['Volume'].iloc[-1]):,}\n"
+                f"   5日区间：${hist['Close'].min():.2f} – ${hist['Close'].max():.2f}\n"
+                f"   最近成交量：{int(hist['Volume'].iloc[-1]):,}\n"
             )
         else:
-            price_info = f"⚠️ No price data found for {symbol}\n"
+            price_info = _bilingual(
+                f"⚠️ No price data found for {symbol}\n",
+                f"⚠️ 未找到 {symbol} 的价格数据\n",
+            )
     except ImportError:
-        price_info = "⚠️ yfinance not available for price data\n"
+        price_info = _bilingual(
+            "⚠️ yfinance not available for price data\n",
+            "⚠️ yfinance 不可用，无法获取价格数据\n",
+        )
     except Exception as e:
-        price_info = f"⚠️ Price fetch failed: {e}\n"
+        price_info = _bilingual(
+            f"⚠️ Price fetch failed: {e}\n",
+            f"⚠️ 获取价格失败：{e}\n",
+        )
 
     # Search Google News RSS specifically for this ticker
     try:
         token = get_copilot_token()
     except Exception as e:
-        tg_send(chat_id, f"{price_info}\n❌ Failed to get API token for analysis: {e}")
+        tg_send(
+            chat_id,
+            _bilingual(
+                f"{price_info}\n❌ Failed to get API token for analysis: {e}",
+                f"{price_info}\n❌ 获取分析所需 API Token 失败：{e}",
+            ),
+        )
         return
 
     gnews_url = (
@@ -868,34 +965,34 @@ def handle_ticker(chat_id: int | str, symbol: str) -> None:
     news_context = "\n".join(f"- {a.title}" for a in relevant[:8])
 
     prompt = (
-        f"Provide a brief analysis of {symbol} stock based on recent news and market conditions.\n\n"
+        f"Provide a brief analysis of {symbol} stock in BOTH English and Chinese (中文) based on recent news and market conditions.\n\n"
         f"Recent relevant news:\n{news_context}\n\n"
         f"Current price info: {price_info}\n\n"
-        f"Include: 1) What's driving the stock, 2) Key risks, 3) Short-term outlook.\n"
-        f"Be concise (5-8 sentences max)."
+        f"Include: 1) What's driving the stock / 驱动因素, 2) Key risks / 关键风险, 3) Short-term outlook / 短期展望.\n"
+        f"Be concise (5-8 sentences max per language)."
     )
 
     analysis = _copilot_chat(prompt, token)
 
     lines = [
-        f"📈 TICKER ANALYSIS: {symbol}",
+        f"📈 TICKER ANALYSIS: {symbol} / 股票分析：{symbol}",
         "═══════════════════════════════",
         price_info,
     ]
 
     if relevant:
-        lines.append("📰 RECENT NEWS:")
+        lines.append("📰 RECENT NEWS / 最近新闻：")
         for a in relevant[:5]:
             lines.append(f"  • {a.title[:80]}")
         lines.append("")
 
     if analysis:
-        lines.append("🤖 AI ANALYSIS:")
+        lines.append("🤖 AI ANALYSIS / AI 分析：")
         lines.append(analysis)
     else:
-        lines.append("❌ Could not generate AI analysis.")
+        lines.append("❌ Could not generate AI analysis. / ❌ 无法生成 AI 分析。")
 
-    lines.append("\n⚠️ AI analysis, not financial advice.")
+    lines.append("\n⚠️ AI analysis, not financial advice. / ⚠️ AI 分析，仅供参考，不构成投资建议。")
     tg_send_long(chat_id, "\n".join(lines))
 
 
@@ -907,33 +1004,36 @@ def handle_ticker(chat_id: int | str, symbol: str) -> None:
 def handle_accuracy(chat_id: int | str) -> None:
     """Show prediction accuracy statistics."""
     stats = _get_accuracy_stats()
-    
+
     if stats["total"] == 0:
-        msg = "📊 No accuracy data yet. Predictions need 24+ hours to be verified."
+        msg = _bilingual(
+            "📊 No accuracy data yet. Predictions need 24+ hours to be verified.",
+            "📊 目前没有准确率数据。预测需要至少 24 小时后才能验证。",
+        )
     else:
         lines = [
-            "📊 PREDICTION ACCURACY STATS",
+            "📊 PREDICTION ACCURACY STATS / 准确率统计",
             f"═══════════════════════════════",
-            f"Overall: {stats['correct']}/{stats['total']} correct ({stats['overall']:.1f}%)",
+            f"Overall: {stats['correct']}/{stats['total']} correct ({stats['overall']:.1f}%) / 总体：{stats['correct']}/{stats['total']} 正确 ({stats['overall']:.1f}%)",
             "",
         ]
 
         if stats["by_model"]:
-            lines.append("BY MODEL:")
+            lines.append("BY MODEL / 按模型：")
             for model, st in stats["by_model"].items():
                 m_acc = (st["correct"] / st["total"] * 100) if st["total"] > 0 else 0
                 lines.append(f"  {model}: {st['correct']}/{st['total']} ({m_acc:.1f}%)")
             lines.append("")
 
         if stats["by_direction"]:
-            lines.append("BY PREDICTED DIRECTION:")
+            lines.append("BY PREDICTED DIRECTION / 按预测方向：")
             for direction, st in stats["by_direction"].items():
                 d_acc = (st["correct"] / st["total"] * 100) if st["total"] > 0 else 0
                 lines.append(f"  {direction}: {st['correct']}/{st['total']} ({d_acc:.1f}%)")
             lines.append("")
 
         if stats["pending"]:
-            lines.append(f"⏳ {stats['pending']} prediction(s) pending verification (< 24h old)")
+            lines.append(f"⏳ {stats['pending']} prediction(s) pending verification (< 24h old) / ⏳ {stats['pending']} 条预测尚未完成验证（<24 小时）")
 
         msg = "\n".join(lines)
 
@@ -1048,21 +1148,41 @@ def handle_update(update: dict) -> None:
         logger.info("/accuracy from chat %s", chat_id)
         handle_accuracy(chat_id)
     elif text == "/start" or text.startswith("/start@"):
-        tg_send(chat_id,
+        tg_send(
+            chat_id,
+            _bilingual(
                 "👋 Market Pulse Bot ready!\n\n"
                 "/report — Generate market analysis report\n"
                 "/status — Show bot status and uptime\n"
                 "/ask <question> — Ask about market conditions\n"
                 "/ticker <SYMBOL> — Analyze a specific stock\n"
-                "/accuracy — Show prediction accuracy stats")
+                "/accuracy — Show prediction accuracy stats",
+                "👋 Market Pulse 机器人已就绪！\n\n"
+                "/report — 生成市场分析报告\n"
+                "/status — 查看机器人状态和运行时长\n"
+                "/ask <问题> — 问市场情况\n"
+                "/ticker <代码> — 分析某只股票\n"
+                "/accuracy — 查看预测准确率统计",
+            ),
+        )
     elif text.startswith("/"):
-        tg_send(chat_id,
+        tg_send(
+            chat_id,
+            _bilingual(
                 "Unknown command. Available:\n"
                 "/report — Generate market analysis report\n"
                 "/status — Show bot status and uptime\n"
                 "/ask <question> — Ask about market conditions\n"
                 "/ticker <SYMBOL> — Analyze a specific stock\n"
-                "/accuracy — Show prediction accuracy stats")
+                "/accuracy — Show prediction accuracy stats",
+                "未知命令。可用命令：\n"
+                "/report — 生成市场分析报告\n"
+                "/status — 查看机器人状态和运行时长\n"
+                "/ask <问题> — 问市场情况\n"
+                "/ticker <代码> — 分析某只股票\n"
+                "/accuracy — 查看预测准确率统计",
+            ),
+        )
 
 
 def main() -> None:
