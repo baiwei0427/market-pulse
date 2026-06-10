@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -19,17 +20,29 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-COMMON_WORDS = {"breaking", "reports", "says", "according"}
+COMMON_WORDS = {"breaking", "reports", "says", "according", "latest", "update",
+                "new", "just", "exclusive", "opinion", "analysis", "live",
+                "watch", "video", "view", "column"}
 
 
 def _canonicalize_word(word: str) -> str:
     text = word.lower().strip()
-    if re.fullmatch(r"(?:strike|strikes|attack|attacks)", text):
+    if re.fullmatch(r"(?:strike|strikes|attack|attacks|attacked|striking)", text):
         return "attack"
-    if re.fullmatch(r"(?:iran|iranian|iranians)", text):
+    if re.fullmatch(r"(?:iran|iranian|iranians|tehran)", text):
         return "iran"
     if re.fullmatch(r"(?:israel|israeli|israelis)", text):
         return "israel"
+    if re.fullmatch(r"(?:tariff|tariffs|duty|duties)", text):
+        return "tariff"
+    if re.fullmatch(r"(?:fed|federal|reserve)", text):
+        return "fed"
+    if re.fullmatch(r"(?:rate|rates|interest)", text):
+        return "rate"
+    if re.fullmatch(r"(?:hike|hikes|raise|raises|increase|increases)", text):
+        return "hike"
+    if re.fullmatch(r"(?:cut|cuts|lower|lowers|decrease|decreases)", text):
+        return "cut"
     return text
 
 
@@ -58,7 +71,7 @@ class EventCluster:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "EventCluster":
-        first_seen = _parse_dt(payload.get("first_seen"))
+        first_seen = _parse_dt(payload.get("first_seen")) if payload.get("first_seen") else datetime.fromtimestamp(0, tz=timezone.utc)
         token_set = set(payload.get("token_set") or [])
         return cls(
             cluster_id=int(payload.get("cluster_id", 0)),
@@ -168,65 +181,70 @@ class ClusterStore:
         self.path = Path(path or os.path.join(os.path.dirname(__file__), "clusters.json"))
         self.logger = logging.getLogger(__name__ + ".ClusterStore")
         self.clusters: list[EventCluster] = []
+        self._lock = threading.RLock()
         self._load()
 
     def _load(self) -> None:
-        try:
-            if not self.path.exists():
+        with self._lock:
+            try:
+                if not self.path.exists():
+                    self.clusters = []
+                    return
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                if not isinstance(raw, list):
+                    raise ValueError("clusters.json must be a JSON array")
+                self.clusters = [EventCluster.from_dict(item) for item in raw]
+                self.logger.info("Loaded %d clusters from %s", len(self.clusters), self.path)
+            except (OSError, ValueError, TypeError) as exc:
+                self.logger.warning("Failed to load clusters from %s: %s", self.path, exc)
                 self.clusters = []
-                return
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(raw, list):
-                raise ValueError("clusters.json must be a JSON array")
-            self.clusters = [EventCluster.from_dict(item) for item in raw]
-            self.logger.info("Loaded %d clusters from %s", len(self.clusters), self.path)
-        except (OSError, ValueError, TypeError) as exc:
-            self.logger.warning("Failed to load clusters from %s: %s", self.path, exc)
-            self.clusters = []
 
     def save(self) -> None:
-        try:
-            self.path.write_text(
-                json.dumps([cluster.to_dict() for cluster in self.clusters], indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            self.logger.error("Failed to save clusters to %s: %s", self.path, exc)
-            raise
+        with self._lock:
+            try:
+                self.path.write_text(
+                    json.dumps([cluster.to_dict() for cluster in self.clusters], indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                self.logger.error("Failed to save clusters to %s: %s", self.path, exc)
+                raise
 
     def prune_old_clusters(self, max_age_hours: int = 24) -> None:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-        original = len(self.clusters)
-        self.clusters = [cluster for cluster in self.clusters if cluster.first_seen >= cutoff]
-        if len(self.clusters) != original:
-            self.logger.info("Pruned %d old clusters older than %dh", original - len(self.clusters), max_age_hours)
+        with self._lock:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+            original = len(self.clusters)
+            self.clusters = [cluster for cluster in self.clusters if cluster.first_seen >= cutoff]
+            if len(self.clusters) != original:
+                self.logger.info("Pruned %d old clusters older than %dh", original - len(self.clusters), max_age_hours)
 
     def add_article(self, title: str, source: str) -> tuple[EventCluster, bool]:
         """Add an article, returning the cluster and whether it is new."""
-        source = (source or "unknown").strip() or "unknown"
-        candidate = find_matching_cluster(title, self.clusters)
-        if candidate is not None:
-            if source not in candidate.sources:
-                candidate.sources.append(source)
-            self.logger.debug("Merged headline %r into existing cluster %s", title[:80], candidate.cluster_id)
+        with self._lock:
+            source = (source or "unknown").strip() or "unknown"
+            candidate = find_matching_cluster(title, self.clusters)
+            if candidate is not None:
+                if source not in candidate.sources:
+                    candidate.sources.append(source)
+                self.logger.debug("Merged headline %r into existing cluster %s", title[:80], candidate.cluster_id)
+                self.prune_old_clusters()
+                self.save()
+                return candidate, False
+
+            cluster = EventCluster(
+                cluster_id=self._next_cluster_id(),
+                first_headline=title.strip(),
+                token_set=title_to_tokens(title),
+                sources=[source],
+                first_seen=datetime.now(timezone.utc),
+                ai_verdict=None,
+                notified=False,
+            )
+            self.clusters.append(cluster)
             self.prune_old_clusters()
             self.save()
-            return candidate, False
-
-        cluster = EventCluster(
-            cluster_id=self._next_cluster_id(),
-            first_headline=title.strip(),
-            token_set=title_to_tokens(title),
-            sources=[source],
-            first_seen=datetime.now(timezone.utc),
-            ai_verdict=None,
-            notified=False,
-        )
-        self.clusters.append(cluster)
-        self.prune_old_clusters()
-        self.save()
-        self.logger.info("Created new cluster %s for %r", cluster.cluster_id, title[:80])
-        return cluster, True
+            self.logger.info("Created new cluster %s for %r", cluster.cluster_id, title[:80])
+            return cluster, True
 
     def _next_cluster_id(self) -> int:
         return max((cluster.cluster_id for cluster in self.clusters), default=0) + 1

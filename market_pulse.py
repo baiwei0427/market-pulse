@@ -657,7 +657,7 @@ def process(
         logger.info("Analyzing: %s", article.title[:120])
         
         cluster, is_new = cluster_store.add_article(article.title, article.source)
-        if not is_new:
+        if not is_new and article.source != "Truth Social":
             logger.info("Skipping duplicate: %s", article.title[:80])
             seen[article.id] = now_iso
             continue
@@ -702,23 +702,7 @@ def process(
                 logger.info("Notification sent for: %s", article.title[:120])
             else:
                 logger.warning("Failed to send notification for: %s", article.title[:120])
-        elif article.source == "Truth Social":
-            # Always send Trump's Truth Social posts regardless of impact score
-            if not should_notify(cluster):
-                logger.info("Cluster already notified: %s", article.title[:80])
-            elif _is_duplicate_notification(article.title):
-                logger.info("Skipping duplicate Truth Social notification: %s", article.title[:80])
-            elif send_telegram(article, verdict):
-                notified += 1
-                cluster.notified = True
-                cluster_store.save()
-                _record_notification(article.title)
-                logger.info("Truth Social notification sent for: %s", article.title[:120])
-            else:
-                logger.warning("Failed to send Truth Social notification for: %s", article.title[:120])
-            # Execute paper trade regardless of Telegram delivery — the
-            # verdict was high-impact and that's what gates trading.
-    
+             
     return notified
 
 
@@ -736,8 +720,8 @@ def _is_duplicate_notification(title: str) -> bool:
         prev_words = set(prev.lower().split())
         if not title_words or not prev_words:
             continue
-        overlap = len(title_words & prev_words) / min(len(title_words), len(prev_words))
-        if overlap > 0.5:  # >50% word overlap = duplicate
+        overlap = len(title_words & prev_words) / len(title_words | prev_words)
+        if overlap > 0.5:  # >50% Jaccard similarity = duplicate
             return True
     return False
 
