@@ -38,6 +38,7 @@ import urllib.request
 import urllib.error
 
 import config
+from event_dedup import ClusterStore, should_notify
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -645,6 +646,7 @@ def process(
     notified = 0
     processed = 0
     now_iso = datetime.now(timezone.utc).isoformat()
+    cluster_store = ClusterStore()
     for article in articles:
         if article.id in seen:
             continue
@@ -653,9 +655,21 @@ def process(
             break
         processed += 1
         logger.info("Analyzing: %s", article.title[:120])
+        
+        cluster, is_new = cluster_store.add_article(article.title, article.source)
+        if not is_new:
+            logger.info("Skipping duplicate: %s", article.title[:80])
+            seen[article.id] = now_iso
+            continue
+        
         verdict = analyze_article_dual(article, token)
         # Mark as seen regardless of analysis outcome to avoid retry loops.
         seen[article.id] = now_iso
+        
+        if verdict is not None:
+            cluster.ai_verdict = verdict
+            cluster_store.save()
+        
         if verdict is None:
             continue
         score = verdict.get("impact_score", 0)
@@ -676,26 +690,36 @@ def process(
             verdict.get("notify"),
         )
         if verdict.get("notify"):
-            if _is_duplicate_notification(article.title):
+            if not should_notify(cluster):
+                logger.info("Cluster already notified: %s", article.title[:80])
+            elif _is_duplicate_notification(article.title):
                 logger.info("Skipping duplicate notification: %s", article.title[:80])
             elif send_telegram(article, verdict):
                 notified += 1
+                cluster.notified = True
+                cluster_store.save()
                 _record_notification(article.title)
                 logger.info("Notification sent for: %s", article.title[:120])
             else:
                 logger.warning("Failed to send notification for: %s", article.title[:120])
         elif article.source == "Truth Social":
             # Always send Trump's Truth Social posts regardless of impact score
-            if _is_duplicate_notification(article.title):
+            if not should_notify(cluster):
+                logger.info("Cluster already notified: %s", article.title[:80])
+            elif _is_duplicate_notification(article.title):
                 logger.info("Skipping duplicate Truth Social notification: %s", article.title[:80])
             elif send_telegram(article, verdict):
                 notified += 1
+                cluster.notified = True
+                cluster_store.save()
                 _record_notification(article.title)
                 logger.info("Truth Social notification sent for: %s", article.title[:120])
             else:
                 logger.warning("Failed to send Truth Social notification for: %s", article.title[:120])
             # Execute paper trade regardless of Telegram delivery — the
             # verdict was high-impact and that's what gates trading.
+    
+    return notified
 
 
 # ---------------------------------------------------------------------------
