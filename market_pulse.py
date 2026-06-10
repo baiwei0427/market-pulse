@@ -676,17 +676,50 @@ def process(
             verdict.get("notify"),
         )
         if verdict.get("notify"):
-            if send_telegram(article, verdict):
+            if _is_duplicate_notification(article.title):
+                logger.info("Skipping duplicate notification: %s", article.title[:80])
+            elif send_telegram(article, verdict):
                 notified += 1
+                _record_notification(article.title)
                 logger.info("Notification sent for: %s", article.title[:120])
             else:
                 logger.warning("Failed to send notification for: %s", article.title[:120])
         elif article.source == "Truth Social":
             # Always send Trump's Truth Social posts regardless of impact score
-            if send_telegram(article, verdict):
+            if _is_duplicate_notification(article.title):
+                logger.info("Skipping duplicate Truth Social notification: %s", article.title[:80])
+            elif send_telegram(article, verdict):
                 notified += 1
+                _record_notification(article.title)
                 logger.info("Truth Social notification sent for: %s", article.title[:120])
             else:
                 logger.warning("Failed to send Truth Social notification for: %s", article.title[:120])
             # Execute paper trade regardless of Telegram delivery — the
             # verdict was high-impact and that's what gates trading.
+
+
+# ---------------------------------------------------------------------------
+# Semantic dedup: skip articles too similar to recently notified ones
+# ---------------------------------------------------------------------------
+_recent_notifications: list[str] = []  # titles of recently notified articles
+_MAX_RECENT = 20
+
+
+def _is_duplicate_notification(title: str) -> bool:
+    """Check if a notification is semantically similar to a recent one."""
+    title_words = set(title.lower().split())
+    for prev in _recent_notifications:
+        prev_words = set(prev.lower().split())
+        if not title_words or not prev_words:
+            continue
+        overlap = len(title_words & prev_words) / min(len(title_words), len(prev_words))
+        if overlap > 0.5:  # >50% word overlap = duplicate
+            return True
+    return False
+
+
+def _record_notification(title: str) -> None:
+    """Record a notified article title for dedup."""
+    _recent_notifications.append(title)
+    while len(_recent_notifications) > _MAX_RECENT:
+        _recent_notifications.pop(0)
