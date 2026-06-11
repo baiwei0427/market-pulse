@@ -9,3 +9,4 @@ accuracy.json
 .truth_social_last
 market_pulse.log.*
 .truth_social_last
+clusters.json

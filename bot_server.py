@@ -1076,9 +1076,12 @@ def _run_analysis() -> None:
 
 def _process_with_tracking(articles, seen, token) -> int:
     """Process articles like mp_process but also record predictions for accuracy."""
+    from event_dedup import ClusterStore, should_notify
+    from market_pulse import _is_duplicate_notification, _record_notification
     notified = 0
     processed = 0
     now_iso = datetime.now(timezone.utc).isoformat()
+    cluster_store = ClusterStore()
 
     for article in articles:
         if article.id in seen:
@@ -1086,15 +1089,35 @@ def _process_with_tracking(articles, seen, token) -> int:
         if processed >= config.MAX_ARTICLES_PER_RUN:
             break
         processed += 1
+
+        # Event clustering dedup — skip AI for duplicate events
+        cluster, is_new = cluster_store.add_article(article.title, article.source)
+        if not is_new and getattr(article, 'source', '') != 'Truth Social':
+            logger.info("Skipping duplicate event: %s", article.title[:80])
+            seen[article.id] = now_iso
+            continue
+
         logger.info("Analyzing: %s", article.title[:120])
         verdict = analyze_article_dual(article, token)
         seen[article.id] = now_iso
         if verdict is None:
             continue
-        if verdict.get("notify"):
-            if mp_send_telegram(article, verdict):
+
+        # Cache AI verdict in cluster
+        if cluster.ai_verdict is None:
+            cluster.ai_verdict = verdict
+            cluster_store.save()
+
+        if verdict.get("notify") or getattr(article, 'source', '') == 'Truth Social':
+            if not should_notify(cluster):
+                logger.info("Cluster already notified: %s", article.title[:80])
+            elif _is_duplicate_notification(article.title):
+                logger.info("Skipping duplicate notification: %s", article.title[:80])
+            elif mp_send_telegram(article, verdict):
                 notified += 1
-                # Record prediction for accuracy tracking
+                cluster.notified = True
+                cluster_store.save()
+                _record_notification(article.title)
                 _record_prediction(verdict, article.title)
                 logger.info("Notification sent for: %s", article.title[:120])
             else:
