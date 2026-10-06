@@ -1,10 +1,10 @@
 # Market Pulse
 
 A Python agent that monitors Trump and Federal Reserve news via public RSS
-feeds, uses dual AI models (`claude-opus-4.6` + `gpt-5.4`) through the GitHub
+feeds, uses dual AI models (`claude-opus-5.5` + `gpt-5.4`) through the GitHub
 Copilot API to assess market impact, and sends Telegram alerts when both models
 agree on high-impact events. Includes an interactive Telegram bot for on-demand
-reports.
+reports. Defaults can be overridden via `COPILOT_MODEL` / `COPILOT_MODEL_2` env vars.
 
 > ⚠️ For informational/educational use only. Nothing this agent outputs is
 > financial advice.
@@ -12,7 +12,7 @@ reports.
 ## How It Works
 
 1. **RSS fetching** — pulls headlines from Nitter (X/Twitter) and Google News RSS feeds.
-2. **Dual-model analysis** — each article is analyzed by both `claude-opus-4.6` and `gpt-5.4`; only articles where both models score impact ≥ 6 trigger alerts.
+2. **Dual-model analysis** — each article is analyzed by both `claude-opus-5.5` and `gpt-5.4`; only articles where both models score impact ≥ 6 trigger alerts.
 3. **Telegram notifications** — high-impact verdicts are sent as bilingual (EN/ZH) alerts with affected sectors, tickers, direction, and action.
 
 ## Files
@@ -129,7 +129,7 @@ sudo systemctl status market-pulse-bot
 - `IMPACT_THRESHOLD` — 0–10; only verdicts at or above this trigger alerts. Default `6`.
 - `MAX_ARTICLES_PER_RUN` — caps Copilot API calls per run. Default `20`.
 - `SEEN_RETENTION_DAYS` — how long to remember article IDs. Default `14`.
-- `COPILOT_MODEL` / `COPILOT_MODEL_2` — the two models used for dual analysis.
+- `COPILOT_MODEL` / `COPILOT_MODEL_2` — defaults are `claude-opus-5.5` + `gpt-5.4`; override via env vars.
 
 ## Troubleshooting
 

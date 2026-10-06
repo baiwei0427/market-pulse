@@ -12,7 +12,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_TELEGRAM_CHAT_ID")
 
 # --- GitHub Copilot API ---
 COPILOT_API_URL = "https://api.githubcopilot.com/chat/completions"
-COPILOT_MODEL = os.environ.get("COPILOT_MODEL", "claude-opus-4.6")
+COPILOT_MODEL = os.environ.get("COPILOT_MODEL", "claude-opus-5.5")
 COPILOT_MODEL_2 = os.environ.get("COPILOT_MODEL_2", "gpt-5.4")
 # If empty, the agent will run `gh auth token` to retrieve a token.
 COPILOT_TOKEN = os.environ.get("COPILOT_TOKEN", "")

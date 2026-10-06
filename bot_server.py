@@ -867,7 +867,7 @@ def handle_ask(chat_id: int | str, question: str) -> None:
         f"If speculative, note uncertainty."
     )
 
-    answer = _copilot_chat(prompt, token, model="claude-opus-4.6")
+    answer = _copilot_chat(prompt, token, model="claude-opus-5.5")
     if answer:
         tg_send_long(
             chat_id,
