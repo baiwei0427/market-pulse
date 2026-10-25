@@ -4,7 +4,7 @@
 Pipeline:
   1. Pull recent Trump-related items from RSS feeds.
   2. De-dupe against a local JSON store of previously processed IDs.
-  3. For each new item, ask the GitHub Copilot chat API (claude-opus-4.6 + gpt-5.4 (dual model)) to
+  3. For each new item, ask two GitHub Copilot models (Claude via chat completions, GPT via responses) to
      classify expected stock-market impact and recommend an action.
   4. If the AI returns a high-impact verdict, push a Telegram notification.
 
@@ -356,12 +356,26 @@ def get_copilot_token() -> str:
 
 
 SYSTEM_PROMPT = (
-    "You are a financial-markets analyst. You will be given a recent news headline "
-    "and short summary related to Donald Trump or the Federal Reserve. Estimate the likely short-term "
-    "impact on US stock markets and identify which sectors or specific tickers "
-    "are most affected. Be conservative: if the news is rumor, opinion, unrelated "
-    "trivia, or not actually market-moving (e.g. personal/social content), set "
-    "impact low. Respond ONLY with a JSON object, no prose, matching this schema:\n"
+    "You are a calibrated financial-news analyst for likely short-term US stock-market impact. "
+    "Evaluate the headline, source, publication context, policy details, and transmission mechanism. "
+    "Use only the supplied evidence; do not invent facts, sources, or reaction timing.\n\n"
+    "Rubric:\n"
+    "- Evidence/source quality: primary official documents or named established reporting beats social posts, anonymous aggregation, opinion, commentary, and unnamed reposts. "
+    "Explicitly identify the evidence basis and its confidence level in the rationale; use lower scores when details are unconfirmed.\n"
+    "- Directness: estimate how directly the news changes policy, regulation, taxes, tariffs, spending, rates, corporate costs, supply, demand, or investor expectations.\n"
+    "- Market mechanism: explain the causal chain to affected sectors and tickers rather than merely saying the headline is important.\n"
+    "- Magnitude: distinguish a modest change from a material nationwide or systemic change.\n"
+    "- Persistence: give higher scores to durable, enforceable, broad, or policy-setting developments than to routine, symbolic, reversible, or one-off events.\n"
+    "Score anchors: 0-2 no direct market impact or merely trivia/personality/social content; "
+    "3-4 weak indirect or routine news with limited mechanism; "
+    "5-6 confirmed, credible news with a moderate market mechanism; "
+    "7-8 high likelihood of meaningful short-term market impact across sectors or major named companies; "
+    "9-10 immediate, major, broad or systemic market impact.\n"
+    "Penalties: substantially downgrade rumors and leaks without confirmation; headlines lacking policy or financial details; opinion and commentary; "
+    "old or duplicate news presented as new; and placeholder, test, or obviously fabricated sources. "
+    "Require evidence and confidence: the rationale must state the strongest supporting evidence and a confidence qualifier (high, medium, or low), "
+    "while never claiming certainty beyond the evidence.\n\n"
+    "Respond ONLY with a JSON object, no prose, matching this exact schema:\n"
     "{\n"
     '  "impact_score": <integer 0-10>,\n'
     '  "summary": "<one-sentence plain-English summary of what Trump said/did>",\n'
@@ -379,6 +393,136 @@ SYSTEM_PROMPT = (
 )
 
 
+def uses_responses_endpoint(model: str, capabilities: dict | None = None) -> bool:
+    """Choose Copilot's Responses API for OpenAI/GPT models."""
+    if capabilities is None:
+        capabilities = getattr(config, "COPILOT_MODEL_CAPABILITIES", {}).get(model, {})
+    if capabilities:
+        endpoint = capabilities.get("endpoint")
+        if isinstance(endpoint, str):
+            if endpoint.lower() in ("responses", "/responses"):
+                return True
+            if endpoint.lower() in ("chat", "chat/completions", "/chat/completions"):
+                return False
+        response_format = capabilities.get("response_format") or capabilities.get("api")
+        if isinstance(response_format, str) and "responses" in response_format.lower():
+            return True
+        if capabilities.get("use_responses") is True:
+            return True
+
+    name = model.lower()
+    return (
+        name.startswith("gpt-")
+        or name.startswith("openai/")
+        or name.startswith("o1")
+        or name.startswith("o3")
+        or name.startswith("o4")
+    )
+
+
+def copilot_request_url(model: str, capabilities: dict | None = None) -> str:
+    if uses_responses_endpoint(model, capabilities):
+        return getattr(
+            config,
+            "COPILOT_RESPONSES_API_URL",
+            "https://api.githubcopilot.com/responses",
+        )
+    return config.COPILOT_API_URL
+
+
+def copilot_reasoning_effort(model: str) -> str:
+    """Return the model-specific reasoning effort, with environment overrides."""
+    name = model.lower()
+    if name == config.COPILOT_MODEL.lower():
+        default = "high"
+        override = os.environ.get(
+            "COPILOT_REASONING_EFFORT_MODEL",
+            getattr(config, "COPILOT_REASONING_EFFORT_MODEL", default),
+        )
+    elif name == getattr(config, "COPILOT_MODEL_2", "").lower():
+        default = "medium"
+        override = os.environ.get(
+            "COPILOT_REASONING_EFFORT_MODEL_2",
+            getattr(config, "COPILOT_REASONING_EFFORT_MODEL_2", default),
+        )
+    else:
+        return "medium"
+
+    effort = override.strip().lower() if override and override.strip() else default
+    return effort if effort in ("low", "medium", "high", "xhigh", "max") else default
+
+
+def copilot_payload(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    temperature: float,
+    json_response: bool = False,
+    capabilities: dict | None = None,
+) -> dict:
+    if uses_responses_endpoint(model, capabilities):
+        textual_input = user_prompt.strip()
+        if "json" not in textual_input.lower():
+            if json_response:
+                textual_input += "\n\nReturn the requested result as a valid JSON object."
+            else:
+                textual_input += "\n\nUse JSON only if it is useful for the response."
+        payload = {
+            "model": model,
+            "input": textual_input,
+        }
+        if system_prompt:
+            payload["instructions"] = system_prompt
+        payload["reasoning"] = {"effort": copilot_reasoning_effort(model)}
+        if json_response:
+            payload["text"] = {"format": {"type": "json_object"}}
+        return payload
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+        "reasoning_effort": copilot_reasoning_effort(model),
+    }
+    if json_response:
+        payload["response_format"] = {"type": "json_object"}
+    return payload
+
+
+def extract_copilot_text(parsed: dict) -> str | None:
+    """Extract text from Chat Completions or Responses API payloads."""
+    try:
+        return parsed["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        pass
+
+    output_text = parsed.get("output_text")
+    if isinstance(output_text, str):
+        return output_text
+
+    texts: list[str] = []
+    output = parsed.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if isinstance(content, str):
+                texts.append(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        texts.append(text)
+    return "\n".join(texts) if texts else None
+
+
 def analyze_article(article: Article, token: str, model: str) -> dict | None:
     user_content = (
         f"Headline: {article.title}\n"
@@ -387,17 +531,15 @@ def analyze_article(article: Article, token: str, model: str) -> dict | None:
         f"Summary: {article.summary or '(none)'}\n"
         f"Link: {article.link}"
     )
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
+    payload = copilot_payload(
+        model,
+        SYSTEM_PROMPT,
+        user_content,
+        temperature=0.2,
+        json_response=True,
+    )
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": "Bearer " + token,
         "Content-Type": "application/json",
         "Copilot-Integration-Id": "vscode-chat",
         "Editor-Version": "market-pulse/1.0",
@@ -405,7 +547,11 @@ def analyze_article(article: Article, token: str, model: str) -> dict | None:
     body = json.dumps(payload).encode("utf-8")
     try:
         status, resp = http_request(
-            config.COPILOT_API_URL, method="POST", headers=headers, data=body, timeout=60
+            copilot_request_url(model),
+            method="POST",
+            headers=headers,
+            data=body,
+            timeout=60,
         )
     except Exception as e:
         logger.error("Copilot request failed (%s): %s", model, e)
@@ -415,7 +561,9 @@ def analyze_article(article: Article, token: str, model: str) -> dict | None:
         return None
     try:
         parsed = json.loads(resp)
-        content = parsed["choices"][0]["message"]["content"]
+        content = extract_copilot_text(parsed)
+        if content is None:
+            raise KeyError("text content")
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         logger.error("Malformed Copilot response (%s): %s", model, e)
         return None
@@ -451,39 +599,36 @@ def _safe_score(verdict: dict | None) -> int:
 
 
 def analyze_article_dual(article: Article, token: str) -> dict | None:
-    """Run both models and combine into a single verdict.
+    """Run both configured models and combine their verdicts conservatively.
 
-    Returns a dict with the merged top-level fields (used by send_telegram),
-    plus 'models' (list of per-model verdicts) and 'notify' (bool indicating
-    whether both models agreed on high impact, or single-model fallback met
-    the threshold).
+    Notification requires both models to return a verdict, both scores to meet
+    the threshold, and the average to meet the threshold.
     """
-    v1 = analyze_article(article, token, config.COPILOT_MODEL)
-    v2 = analyze_article(article, token, config.COPILOT_MODEL_2)
-    if v1 is None and v2 is None:
+    model_names = (config.COPILOT_MODEL, config.COPILOT_MODEL_2)
+    verdicts = [analyze_article(article, token, model) for model in model_names]
+    available = [
+        (model, verdict)
+        for model, verdict in zip(model_names, verdicts)
+        if verdict is not None
+    ]
+    if not available:
         return None
 
-    s1 = _safe_score(v1)
-    s2 = _safe_score(v2)
+    per_model = [
+        {"model": model, "score": _safe_score(verdict), "verdict": verdict}
+        for model, verdict in available
+    ]
+    scores = [item["score"] for item in per_model]
+    avg_score = sum(scores) / len(scores)
+    threshold = config.IMPACT_THRESHOLD
 
-    per_model: list[dict] = []
-    if v1 is not None:
-        per_model.append({"model": config.COPILOT_MODEL, "score": s1, "verdict": v1})
-    if v2 is not None:
-        per_model.append({"model": config.COPILOT_MODEL_2, "score": s2, "verdict": v2})
-
-    if v1 is not None and v2 is not None:
-        avg_score = (s1 + s2) / 2.0
-        notify = s1 >= config.IMPACT_THRESHOLD and s2 >= config.IMPACT_THRESHOLD
-        # Pick the verdict with the higher score as the primary fields source.
-        primary = v1 if s1 >= s2 else v2
+    if len(scores) == 2:
+        notify = all(score >= threshold for score in scores) and avg_score >= threshold
     else:
-        # Single-model fallback.
-        primary = v1 if v1 is not None else v2
-        only_score = s1 if v1 is not None else s2
-        avg_score = float(only_score)
-        notify = only_score >= config.IMPACT_THRESHOLD
-        logger.warning("Only one model returned a verdict; using single-model fallback")
+        notify = False
+        logger.warning("Only one model returned a verdict; notification requires both scores")
+
+    primary = max(available, key=lambda item: _safe_score(item[1]))[1]
 
     merged = dict(primary)
     merged["impact_score"] = avg_score

@@ -39,6 +39,9 @@ from market_pulse import (
     logger,
     send_telegram_text,
     _md_escape,
+    copilot_payload,
+    copilot_request_url,
+    extract_copilot_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -341,16 +344,15 @@ def _get_current_et() -> datetime:
 
 def _copilot_chat(prompt: str, token: str, model: str | None = None) -> str | None:
     """Send a freeform prompt to Copilot API and return the text response."""
-    payload = {
-        "model": model or config.COPILOT_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a financial markets analyst. Be concise and actionable."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.3,
-    }
+    selected_model = model or config.COPILOT_MODEL
+    payload = copilot_payload(
+        selected_model,
+        "You are a financial markets analyst. Be concise and actionable.",
+        prompt,
+        temperature=0.3,
+    )
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": "Bearer " + token,
         "Content-Type": "application/json",
         "Copilot-Integration-Id": "vscode-chat",
         "Editor-Version": "market-pulse/1.0",
@@ -358,7 +360,11 @@ def _copilot_chat(prompt: str, token: str, model: str | None = None) -> str | No
     body = json.dumps(payload).encode("utf-8")
     try:
         status, resp = http_request(
-            config.COPILOT_API_URL, method="POST", headers=headers, data=body, timeout=60
+            copilot_request_url(selected_model),
+            method="POST",
+            headers=headers,
+            data=body,
+            timeout=60,
         )
     except Exception as e:
         logger.error("Copilot chat request failed: %s", e)
@@ -368,7 +374,7 @@ def _copilot_chat(prompt: str, token: str, model: str | None = None) -> str | No
         return None
     try:
         parsed = json.loads(resp)
-        return parsed["choices"][0]["message"]["content"]
+        return extract_copilot_text(parsed)
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         logger.error("Malformed Copilot chat response: %s", e)
         return None
@@ -824,7 +830,10 @@ def handle_status(chat_id: int | str) -> None:
             lines.append(f"   Sell tickers: {', '.join(sell)} / 卖出标的：{', '.join(sell)}")
     else:
         lines.append("\nNo report has been run yet. / 尚未执行过报告。")
-    lines.append(f"\nModels: {config.COPILOT_MODEL} + {config.COPILOT_MODEL_2} / 模型：{config.COPILOT_MODEL} + {config.COPILOT_MODEL_2}")
+    lines.append(
+        f"\nModels: {config.COPILOT_MODEL} + {config.COPILOT_MODEL_2} / "
+        f"模型：{config.COPILOT_MODEL} + {config.COPILOT_MODEL_2}"
+    )
     tg_send(chat_id, "\n".join(lines))
 
 
@@ -867,7 +876,7 @@ def handle_ask(chat_id: int | str, question: str) -> None:
         f"If speculative, note uncertainty."
     )
 
-    answer = _copilot_chat(prompt, token, model="claude-opus-4.6")
+    answer = _copilot_chat(prompt, token, model=config.COPILOT_MODEL)
     if answer:
         tg_send_long(
             chat_id,
