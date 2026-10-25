@@ -11,9 +11,19 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOK
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_TELEGRAM_CHAT_ID")
 
 # --- GitHub Copilot API ---
-COPILOT_API_URL = "https://api.githubcopilot.com/chat/completions"
-COPILOT_MODEL = os.environ.get("COPILOT_MODEL", "claude-opus-4.6")
-COPILOT_MODEL_2 = os.environ.get("COPILOT_MODEL_2", "gpt-5.4")
+COPILOT_API_URL = os.environ.get(
+    "COPILOT_API_URL", "https://api.githubcopilot.com/chat/completions"
+)
+COPILOT_RESPONSES_API_URL = os.environ.get(
+    "COPILOT_RESPONSES_API_URL", "https://api.githubcopilot.com/responses"
+)
+COPILOT_MODEL = os.environ.get("COPILOT_MODEL", "claude-opus-5.5")
+COPILOT_MODEL_2 = os.environ.get("COPILOT_MODEL_2", "gpt-6.1-sol")
+COPILOT_MODEL_3 = os.environ.get("COPILOT_MODEL_3", "mai-code-2-flash")
+COPILOT_REASONING_EFFORT_MODEL = os.environ.get("COPILOT_REASONING_EFFORT_MODEL", "high")
+COPILOT_REASONING_EFFORT_MODEL_2 = os.environ.get("COPILOT_REASONING_EFFORT_MODEL_2", "medium")
+COPILOT_REASONING_EFFORT_MODEL_3 = os.environ.get("COPILOT_REASONING_EFFORT_MODEL_3", "medium")
+COPILOT_MODEL_CAPABILITIES = {}
 # If empty, the agent will run `gh auth token` to retrieve a token.
 COPILOT_TOKEN = os.environ.get("COPILOT_TOKEN", "")
 
