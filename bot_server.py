@@ -27,7 +27,6 @@ import config
 from market_pulse import (
     Article,
     analyze_article_dual,
-    analyze_article_three,
     acquire_lock as mp_acquire_lock,
     fetch_feed,
     gather_articles,
@@ -408,7 +407,7 @@ def _send_daily_summary() -> None:
         cap = min(len(articles), 15)
         for article in articles[:cap]:
             try:
-                verdict = analyze_article_three(article, token)
+                verdict = analyze_article_dual(article, token)
             except Exception as e:
                 logger.error("Daily summary analysis error: %s", e)
                 continue
@@ -504,7 +503,7 @@ def _send_premarket_alert() -> None:
         cap = min(len(articles), 12)
         for article in articles[:cap]:
             try:
-                verdict = analyze_article_three(article, token)
+                verdict = analyze_article_dual(article, token)
             except Exception as e:
                 logger.error("Pre-market analysis error: %s", e)
                 continue
@@ -674,7 +673,7 @@ def handle_report(chat_id: int | str) -> None:
         for article in articles[:cap]:
             analyzed += 1
             try:
-                verdict = analyze_article_three(article, token)
+                verdict = analyze_article_dual(article, token)
             except Exception as e:
                 logger.error("Analysis error for '%s': %s", article.title[:80], e)
                 continue
@@ -832,10 +831,8 @@ def handle_status(chat_id: int | str) -> None:
     else:
         lines.append("\nNo report has been run yet. / 尚未执行过报告。")
     lines.append(
-        f"\nModels: {config.COPILOT_MODEL} + {config.COPILOT_MODEL_2} + "
-        f"{getattr(config, 'COPILOT_MODEL_3', 'mai-code-2-flash')} / "
-        f"模型：{config.COPILOT_MODEL} + {config.COPILOT_MODEL_2} + "
-        f"{getattr(config, 'COPILOT_MODEL_3', 'mai-code-2-flash')}"
+        f"\nModels: {config.COPILOT_MODEL} + {config.COPILOT_MODEL_2} / "
+        f"模型：{config.COPILOT_MODEL} + {config.COPILOT_MODEL_2}"
     )
     tg_send(chat_id, "\n".join(lines))
 
@@ -1110,7 +1107,7 @@ def _process_with_tracking(articles, seen, token) -> int:
             continue
 
         logger.info("Analyzing: %s", article.title[:120])
-        verdict = analyze_article_three(article, token)
+        verdict = analyze_article_dual(article, token)
         seen[article.id] = now_iso
         if verdict is None:
             continue

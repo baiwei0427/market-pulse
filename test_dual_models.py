@@ -5,14 +5,14 @@ import config
 from market_pulse import (
     Article,
     SYSTEM_PROMPT,
-    analyze_article_three,
+    analyze_article_dual,
     copilot_payload,
     copilot_reasoning_effort,
     copilot_request_url,
 )
 
 
-class ThreeModelTests(unittest.TestCase):
+class DualModelTests(unittest.TestCase):
     def setUp(self):
         self.article = Article(
             id="test-1",
@@ -23,47 +23,44 @@ class ThreeModelTests(unittest.TestCase):
             summary="No real market event.",
         )
 
-    def test_aggregation_and_majority_notify(self):
-        verdicts = [
-            {"impact_score": 8, "summary": "one"},
-            {"impact_score": 7, "summary": "two"},
-            {"impact_score": 5, "summary": "three"},
-        ]
+    def test_queries_only_two_configured_models(self):
+        verdicts = [{"impact_score": 8}, {"impact_score": 7}]
+        with patch("market_pulse.analyze_article", side_effect=verdicts) as mock:
+            analyze_article_dual(self.article, "token")
+        self.assertEqual(
+            [c.args[2] for c in mock.call_args_list],
+            [config.COPILOT_MODEL, config.COPILOT_MODEL_2],
+        )
+        self.assertEqual(config.COPILOT_MODEL, "claude-opus-5.5")
+        self.assertEqual(config.COPILOT_MODEL_2, "gpt-6.1-sol")
+        self.assertFalse(hasattr(config, "COPILOT_MODEL_3"))
+
+    def test_both_meet_threshold_notifies(self):
+        verdicts = [{"impact_score": 8, "summary": "one"}, {"impact_score": 7, "summary": "two"}]
         with patch("market_pulse.analyze_article", side_effect=verdicts):
-            result = analyze_article_three(self.article, "token")
-        self.assertEqual(result["impact_score"], 20 / 3)
+            result = analyze_article_dual(self.article, "token")
+        self.assertEqual(result["impact_score"], 7.5)
         self.assertTrue(result["notify"])
-        self.assertEqual([m["score"] for m in result["models"]], [8, 7, 5])
+        self.assertEqual(result["summary"], "one")
+        self.assertEqual([m["score"] for m in result["models"]], [8, 7])
 
     def test_no_notify_when_only_one_reaches_threshold(self):
-        verdicts = [
-            {"impact_score": 8},
-            {"impact_score": 5},
-            {"impact_score": 4},
-        ]
+        verdicts = [{"impact_score": 9}, {"impact_score": 5}]
         with patch("market_pulse.analyze_article", side_effect=verdicts):
-            result = analyze_article_three(self.article, "token")
+            result = analyze_article_dual(self.article, "token")
+        self.assertEqual(result["impact_score"], 7.0)
         self.assertFalse(result["notify"])
 
-    def test_two_available_both_must_meet_threshold(self):
-        verdicts = [{"impact_score": 8}, {"impact_score": 7}, None]
-        with patch("market_pulse.analyze_article", side_effect=verdicts):
-            result = analyze_article_three(self.article, "token")
-        self.assertTrue(result["notify"])
-        self.assertEqual(len(result["models"]), 2)
+    def test_single_available_verdict_does_not_notify(self):
+        for verdicts in ([{"impact_score": 9}, None], [None, {"impact_score": 9}]):
+            with patch("market_pulse.analyze_article", side_effect=verdicts):
+                result = analyze_article_dual(self.article, "token")
+            self.assertFalse(result["notify"])
+            self.assertEqual(len(result["models"]), 1)
 
-        verdicts = [{"impact_score": 8}, {"impact_score": 5}, None]
-        with patch("market_pulse.analyze_article", side_effect=verdicts):
-            result = analyze_article_three(self.article, "token")
-        self.assertFalse(result["notify"])
-
-    def test_mai_uses_responses_payload(self):
-        payload = copilot_payload(
-            "mai-code-2-flash", "Reply briefly.", "OK", temperature=0.2
-        )
-        self.assertIn("input", payload)
-        self.assertNotIn("messages", payload)
-        self.assertTrue(copilot_request_url("mai-code-2-flash").endswith("/responses"))
+    def test_no_verdicts_returns_none(self):
+        with patch("market_pulse.analyze_article", side_effect=[None, None]):
+            self.assertIsNone(analyze_article_dual(self.article, "token"))
 
     def test_anthropic_uses_chat_payload(self):
         payload = copilot_payload(
@@ -89,16 +86,6 @@ class ThreeModelTests(unittest.TestCase):
     def test_structured_responses_input_keeps_json_format(self):
         payload = copilot_payload(
             "gpt-6.1-sol",
-            "Financial analysis.",
-            "Analyze the headline.",
-            temperature=0.2,
-            json_response=True,
-        )
-        self.assertIn("json", payload["input"].lower())
-        self.assertEqual(payload["text"], {"format": {"type": "json_object"}})
-
-        payload = copilot_payload(
-            "mai-code-2-flash",
             "Financial analysis.",
             "Analyze the headline.",
             temperature=0.2,
@@ -145,7 +132,6 @@ class ThreeModelTests(unittest.TestCase):
     def test_model_reasoning_defaults(self):
         self.assertEqual(copilot_reasoning_effort("claude-opus-5.5"), "high")
         self.assertEqual(copilot_reasoning_effort("gpt-6.1-sol"), "medium")
-        self.assertEqual(copilot_reasoning_effort("mai-code-2-flash"), "medium")
 
 
 if __name__ == "__main__":

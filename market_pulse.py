@@ -4,7 +4,7 @@
 Pipeline:
   1. Pull recent Trump-related items from RSS feeds.
   2. De-dupe against a local JSON store of previously processed IDs.
-  3. For each new item, ask three GitHub Copilot models (Claude via chat completions, GPT and MAI via responses) to
+  3. For each new item, ask two GitHub Copilot models (Claude via chat completions, GPT via responses) to
      classify expected stock-market impact and recommend an action.
   4. If the AI returns a high-impact verdict, push a Telegram notification.
 
@@ -394,7 +394,7 @@ SYSTEM_PROMPT = (
 
 
 def uses_responses_endpoint(model: str, capabilities: dict | None = None) -> bool:
-    """Choose Copilot's Responses API for OpenAI/GPT and MAI models."""
+    """Choose Copilot's Responses API for OpenAI/GPT models."""
     if capabilities is None:
         capabilities = getattr(config, "COPILOT_MODEL_CAPABILITIES", {}).get(model, {})
     if capabilities:
@@ -413,8 +413,6 @@ def uses_responses_endpoint(model: str, capabilities: dict | None = None) -> boo
     name = model.lower()
     return (
         name.startswith("gpt-")
-        or name.startswith("mai-")
-        or "mai-code" in name
         or name.startswith("openai/")
         or name.startswith("o1")
         or name.startswith("o3")
@@ -446,12 +444,6 @@ def copilot_reasoning_effort(model: str) -> str:
         override = os.environ.get(
             "COPILOT_REASONING_EFFORT_MODEL_2",
             getattr(config, "COPILOT_REASONING_EFFORT_MODEL_2", default),
-        )
-    elif name == getattr(config, "COPILOT_MODEL_3", "").lower():
-        default = "medium"
-        override = os.environ.get(
-            "COPILOT_REASONING_EFFORT_MODEL_3",
-            getattr(config, "COPILOT_REASONING_EFFORT_MODEL_3", default),
         )
     else:
         return "medium"
@@ -606,13 +598,13 @@ def _safe_score(verdict: dict | None) -> int:
         return 0
 
 
-def analyze_article_three(article: Article, token: str) -> dict | None:
-    """Run all configured models and combine their verdicts conservatively."""
-    model_names = (
-        config.COPILOT_MODEL,
-        config.COPILOT_MODEL_2,
-        getattr(config, "COPILOT_MODEL_3", "mai-code-2-flash"),
-    )
+def analyze_article_dual(article: Article, token: str) -> dict | None:
+    """Run both configured models and combine their verdicts conservatively.
+
+    Notification requires both models to return a verdict, both scores to meet
+    the threshold, and the average to meet the threshold.
+    """
+    model_names = (config.COPILOT_MODEL, config.COPILOT_MODEL_2)
     verdicts = [analyze_article(article, token, model) for model in model_names]
     available = [
         (model, verdict)
@@ -630,14 +622,11 @@ def analyze_article_three(article: Article, token: str) -> dict | None:
     avg_score = sum(scores) / len(scores)
     threshold = config.IMPACT_THRESHOLD
 
-    if len(scores) == 3:
-        majority = sum(score >= threshold for score in scores) >= 2
-        notify = majority and avg_score >= threshold
-    elif len(scores) == 2:
+    if len(scores) == 2:
         notify = all(score >= threshold for score in scores) and avg_score >= threshold
     else:
         notify = False
-        logger.warning("Only one model returned a verdict; notification requires at least two scores")
+        logger.warning("Only one model returned a verdict; notification requires both scores")
 
     primary = max(available, key=lambda item: _safe_score(item[1]))[1]
 
@@ -646,11 +635,6 @@ def analyze_article_three(article: Article, token: str) -> dict | None:
     merged["models"] = per_model
     merged["notify"] = notify
     return merged
-
-
-def analyze_article_dual(article: Article, token: str) -> dict | None:
-    """Backward-compatible alias; now runs all three configured models."""
-    return analyze_article_three(article, token)
 
 
 # ---------------------------------------------------------------------------
@@ -823,7 +807,7 @@ def process(
             seen[article.id] = now_iso
             continue
         
-        verdict = analyze_article_three(article, token)
+        verdict = analyze_article_dual(article, token)
         # Mark as seen regardless of analysis outcome to avoid retry loops.
         seen[article.id] = now_iso
         

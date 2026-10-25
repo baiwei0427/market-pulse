@@ -19,10 +19,8 @@ COPILOT_RESPONSES_API_URL = os.environ.get(
 )
 COPILOT_MODEL = os.environ.get("COPILOT_MODEL", "claude-opus-5.5")
 COPILOT_MODEL_2 = os.environ.get("COPILOT_MODEL_2", "gpt-6.1-sol")
-COPILOT_MODEL_3 = os.environ.get("COPILOT_MODEL_3", "mai-code-2-flash")
 COPILOT_REASONING_EFFORT_MODEL = os.environ.get("COPILOT_REASONING_EFFORT_MODEL", "high")
 COPILOT_REASONING_EFFORT_MODEL_2 = os.environ.get("COPILOT_REASONING_EFFORT_MODEL_2", "medium")
-COPILOT_REASONING_EFFORT_MODEL_3 = os.environ.get("COPILOT_REASONING_EFFORT_MODEL_3", "medium")
 COPILOT_MODEL_CAPABILITIES = {}
 # If empty, the agent will run `gh auth token` to retrieve a token.
 COPILOT_TOKEN = os.environ.get("COPILOT_TOKEN", "")
